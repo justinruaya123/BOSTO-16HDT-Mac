@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+BT_VERSION=$(python3 UnifiedDriver/version.py ${BT_VERSION+--override "$BT_VERSION"})
+BT_BUILD_VERSION=$(python3 UnifiedDriver/version.py --build)
+export BT_VERSION BT_BUILD_VERSION
 export TMPDIR="$PWD/build/unified/scratch"
 APP=build/unified/BostoTablet.app
 OUT=build/unified/verified-package
@@ -13,19 +16,19 @@ codesign --verify --deep --strict "$OUT/Payload/BostoTablet.app"
 "$OUT/Payload/BostoTablet.app/Contents/MacOS/BostoTablet" --self-check
 python3 - <<'PY'
 from pathlib import Path
-import plistlib, hashlib, xml.etree.ElementTree as ET
+import plistlib, hashlib, os, xml.etree.ElementTree as ET
 root=Path('build/unified')
 a=root/'BostoTablet.app'
 b=root/'verified-package/Payload/BostoTablet.app'
 info=plistlib.loads((a/'Contents/Info.plist').read_bytes())
 assert info['CFBundleIdentifier']=='local.BostoTablet'
-assert info['CFBundleShortVersionString']=='0.1.4'
-assert info['CFBundleVersion']=='9'
+assert info['CFBundleShortVersionString']==os.environ['BT_VERSION']
+assert info['CFBundleVersion']==os.environ['BT_BUILD_VERSION']
 assert info['LSFileQuarantineEnabled'] is True
 assert info['CFBundleExecutable']=='BostoTablet'
 assert not info.get('LSBackgroundOnly',False)
 pkg=ET.parse(root/'verified-package/PackageInfo').getroot()
-assert pkg.attrib['version']=='0.1.4'
+assert pkg.attrib['version']==os.environ['BT_VERSION']
 assert pkg.attrib['install-location']=='/Applications'
 assert pkg.attrib['relocatable']=='false'
 assert pkg.attrib['postinstall-action']=='none'

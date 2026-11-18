@@ -3,17 +3,26 @@ name: macOS package
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Keep version selection, build and publication in one queue for main pushes.
+# Other runs never share that queue, including manual runs on main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main-release' || format('ci-{0}', github.run_id) }}
+  queue: max
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 20
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     env:
       BT_LIVE_TESTS: '0'
     steps:
@@ -23,6 +32,27 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Determine package version
+        id: version
+        env:
+          MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse --verify HEAD^{commit})
+          test "$commit" = "$EXPECTED_COMMIT"
+          if [[ "$MAIN_PUSH" == true ]]; then
+            version=$(python3 UnifiedDriver/version.py --next "$commit")
+          else
+            version=$(python3 UnifiedDriver/version.py)
+          fi
+          echo "BT_VERSION=$version" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - name: Test release version policy offline
+        run: python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
       - name: Run offline tests
         run: bash UnifiedDriver/test.sh
       - name: Run Multitouch regressions
@@ -31,15 +61,6 @@ jobs:
         run: bash UnifiedDriver/build.sh
       - name: Verify package offline
         run: bash UnifiedDriver/verify.sh
-      - name: Check release tag matches verified package version
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
-          # verify.sh already checks the app and PackageInfo versions and payload equality.
-          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/unified/BostoTablet.app/Contents/Info.plist)
-          test "$RELEASE_TAG" = "v$version"
       - name: Generate SHA-256
         working-directory: build/unified
         run: shasum -a 256 BostoTablet.pkg > SHA256SUMS
@@ -54,8 +75,9 @@ jobs:
 
   release:
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -69,11 +91,87 @@ jobs:
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          VERIFIED_COMMIT: ${{ needs.build.outputs.commit }}
+          EXPECTED_COMMIT: ${{ github.sha }}
         run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$VERIFIED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$VERIFIED_COMMIT" = "$EXPECTED_COMMIT"
+          RELEASE_TAG="v$RELEASE_VERSION"
+          ref="repos/$GH_REPO/git/ref/tags/$RELEASE_TAG"
+          # Never force or update a ref. A failed lookup may be a race or API error;
+          # creation and a fresh lookup must succeed before publication continues.
+          if ! gh api "$ref" > tag.json; then
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$VERIFIED_COMMIT" || true
+            gh api "$ref" > tag.json
+          fi
+          type=$(jq -er '.object.type' tag.json)
+          sha=$(jq -er '.object.sha' tag.json)
+          # Resolve existing annotated tags too; only a proven commit is accepted.
+          for ((depth=0; depth<16; depth++)); do
+            [[ "$type" == tag ]] || break
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+            gh api "repos/$GH_REPO/git/tags/$sha" > tag.json
+            type=$(jq -er '.object.type' tag.json)
+            sha=$(jq -er '.object.sha' tag.json)
+          done
+          if [[ "$type" != commit || "$sha" != "$VERIFIED_COMMIT" ]]; then
+            echo "Refusing release: $RELEASE_TAG does not resolve to $VERIFIED_COMMIT" >&2
+            exit 1
+          fi
+          verify_published_assets() {
+            if ! jq -e '
+              .draft == false and .prerelease == false and
+              (.published_at | type == "string" and length > 0) and
+              ([.assets[] | select(.name == "BostoTablet.pkg" and .size > 0)] | length == 1) and
+              ([.assets[] | select(.name == "SHA256SUMS" and .size > 0)] | length == 1)
+            ' release.json > /dev/null; then
+              echo "Refusing incomplete or non-stable release $RELEASE_TAG; leaving it unchanged." >&2
+              return 1
+            fi
+            mkdir published
+            gh release download "$RELEASE_TAG" --dir published --pattern BostoTablet.pkg --pattern SHA256SUMS
+            # Compare an exact, locally recomputed manifest; don't interpret remote filenames.
+            (cd published && shasum -a 256 BostoTablet.pkg > expected.sha256 && cmp SHA256SUMS expected.sha256)
+            published_hash=$(cut -d ' ' -f 1 published/expected.sha256)
+            jq -e --arg marker "BostoTablet.pkg SHA-256: $published_hash" \
+              '.body | split("\n") | index($marker) != null' release.json > /dev/null
+          }
+          if gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json; then
+            verify_published_assets
+            echo "Published release $RELEASE_TAG matches its recorded checksum; leaving it unchanged."
+            exit 0
+          fi
+          # Compare every published stable release numerically, including older
+          # reservations completed after a newer release. Fail closed on API errors.
+          gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" > releases.json
+          latest=$(python3 - "$RELEASE_VERSION" <<'PY'
+          import json, re, sys
+          pattern = re.compile(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', re.ASCII)
+          candidate = tuple(map(int, sys.argv[1].split('.')))
+          newer = False
+          with open('releases.json') as source:
+              for page in json.load(source):
+                  for release in page:
+                      match = pattern.fullmatch(release['tag_name'])
+                      if match and release['draft'] is False and release['prerelease'] is False and release['published_at']:
+                          newer |= tuple(map(int, match.groups())) > candidate
+          print('false' if newer else 'true')
+          PY
+          )
+          built_hash=$(shasum -a 256 BostoTablet.pkg | cut -d ' ' -f 1)
+          notes=$(printf '%s\n\nBostoTablet.pkg SHA-256: %s\n' \
+            'Apple Silicon (arm64) package. Installer is unsigned and unnotarized; app is ad hoc signed. Includes SHA256SUMS for verification.' "$built_hash")
           gh release create "$RELEASE_TAG" \
             --verify-tag \
             --title "BostoTablet $RELEASE_TAG" \
-            --notes "Apple Silicon (arm64) package. Installer is unsigned and unnotarized; app is ad hoc signed. Includes SHA256SUMS for verification." \
-            --latest \
+            --notes "$notes" \
+            --latest="$latest" \
             BostoTablet.pkg SHA256SUMS
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json
+          verify_published_assets
+          cmp BostoTablet.pkg published/BostoTablet.pkg
+          cmp SHA256SUMS published/SHA256SUMS

@@ -1,10 +1,12 @@
 # BostoTablet unified driver
 
 An Apple Silicon-only arm64 app (`local.BostoTablet`) and one component package targeting
-`/Applications/BostoTablet.app`. Launch starts disabled. Choose the display and
-press Enable to acquire pen and touch together. Quitting, disabling, display
+`/Applications/BostoTablet.app`. Launch attempts pen and touch once for the saved
+display or a unique nonmirrored Bosto Tablet display, if permissions are already
+granted. Otherwise, choose the display and press Enable. Quitting, disabling, display
 changes, sleep/session changes, permission loss, or device failures release the
-owned streams. No autostart, launch agent, install scripts, pen writes, Wacom
+owned streams. Optional Open at Login uses macOS 13+ SMAppService. No launch
+agent, install scripts, pen writes, Wacom
 settings, mouse settings, or vendor executables are included.
 
 ## Scope and implementation
@@ -106,7 +108,9 @@ Full regression output is `build/unified-regression/results.log`.
 
 Deliverables: `build/unified/BostoTablet.app` and
 `build/unified/BostoTablet.pkg`. The app is locally ad-hoc signed; the package is
-unsigned. `verify.sh` checks signatures, arm64-only architecture, identity,
+unsigned. Packaging defaults to the source plist version; set the same validated
+`BT_VERSION=MAJOR.MINOR.PATCH` for build and verification to override it.
+`verify.sh` checks the expected app and package versions, signatures, arm64-only architecture, identity,
 nonrelocatable `/Applications` installation, absence of scripts/extra payload,
 and byte-for-byte equality of packaged and built app files. It executes only the
 explicit offline `--self-check` path in both actual executables. This path does
@@ -138,8 +142,8 @@ also checked separately with its finer native quantization tolerance.
 ## Pen controls
 
 The window has native Home / Setup, Pen and Buttons tabs. Home keeps
-its display, enable/disable, delay, status and diagnostics controls. Startup stays
-disabled. Pen has a continuous Softer–Linear–Firmer slider and Reset to linear.
+its display, enable/disable, delay, status and diagnostics controls. Startup makes
+one permission-gated attempt; failures require manual Enable. Pen has a continuous Softer–Linear–Firmer slider and Reset to linear.
 Changes save immediately and update the running pen without reopening HID or
 changing the display. `UPPressure` is the single mapping used by native outgoing
 events and the live tester. The tester consumes only accepted exact pen packets,
