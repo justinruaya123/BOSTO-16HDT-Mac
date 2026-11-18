@@ -23,6 +23,14 @@ validated hardware compatibility.
 
 ## Build or download
 
+Download the latest stable release's [BostoTablet.pkg](https://github.com/justinruaya123/BOSTO-16HDT-Mac/releases/latest/download/BostoTablet.pkg)
+and [SHA256SUMS](https://github.com/justinruaya123/BOSTO-16HDT-Mac/releases/latest/download/SHA256SUMS)
+into the same directory, then verify before installing:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
 On an Apple Silicon Mac with Xcode Command Line Tools available, run from the
 repository root:
 
@@ -50,7 +58,17 @@ shasum -a 256 -c SHA256SUMS
 The artifact contains only `BostoTablet.pkg` and `SHA256SUMS`. CI runs on pushes
 to `main`, pull requests, and manual dispatch using GitHub-hosted arm64
 `macos-15`. It runs offline tests, builds and verifies the package, and uploads
-the artifact; it does not install the package or publish releases.
+the artifact; it does not install the package.
+
+Pushing an exact `vMAJOR.MINOR.PATCH` tag (for example, `v0.1.3`) also runs this
+workflow. Before uploading, the macOS job requires the tag version to match
+the verified app's `CFBundleShortVersionString`; package verification also
+checks the `PackageInfo` version and packaged payload. Only a successful tag
+push can publish: a separate Ubuntu job downloads that run's
+`BostoTablet-arm64` artifact, verifies `SHA256SUMS`, and creates a stable GitHub
+Release marked latest with only `BostoTablet.pkg` and `SHA256SUMS` attached.
+Existing releases are not overwritten. Pull requests, manual runs, and pushes
+to `main` provide CI artifacts only.
 
 ## Permissions and validation limits
 
