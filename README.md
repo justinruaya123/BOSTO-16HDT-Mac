@@ -1,0 +1,77 @@
+# BostoTablet for macOS
+
+BostoTablet is an Apple Silicon-only userspace driver for the exact Bosto
+BT-16HDT interfaces below. `UnifiedDriver/` is the current app and package;
+`Multitouch/` supplies its touch implementation and regression suite. The app
+combines pen and touch controls, starts disabled, and has no autostart service.
+Intel Macs and legacy binaries are outside this publication's scope.
+
+## Device scope
+
+Matching is restricted to these USB VID:PID and HID usage pairs. The model name
+alone does not establish compatibility.
+
+| Interface | VID:PID | Usage page:usage |
+| --- | --- | --- |
+| Pen | `0ED1:7821` | `0D:02` (digitizer pen) |
+| Touch | `6066:0001` | `0D:04` (touch screen), `01:02` (mouse companion) |
+
+Touch initialization additionally requires firmware bytes `[9,1,26]` before
+sending `[3,0x0b,0]` to the touch digitizer. Other revisions, including pen PID
+`782C`, are unsupported. These are implementation limits, not a claim of
+validated hardware compatibility.
+
+## Build or download
+
+On an Apple Silicon Mac with Xcode Command Line Tools available, run from the
+repository root:
+
+```sh
+test "$(uname -m)" = arm64
+BT_LIVE_TESTS=0 bash UnifiedDriver/test.sh
+BT_LIVE_TESTS=0 bash UnifiedDriver/regression.sh
+bash UnifiedDriver/build.sh
+bash UnifiedDriver/verify.sh
+(cd build/unified && shasum -a 256 BostoTablet.pkg > SHA256SUMS)
+```
+
+Outputs are `build/unified/BostoTablet.app` and `build/unified/BostoTablet.pkg`.
+The app is ad hoc signed; the installer package is unsigned and neither is
+notarized. No signing credentials are required.
+
+For a CI build, open [Actions → macOS package](https://github.com/justinruaya123/BOSTO-16HDT-Mac/actions/workflows/macos.yml),
+select a successful run for the intended commit, and download the
+`BostoTablet-arm64` artifact. Extract it, then verify from that directory:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+The artifact contains only `BostoTablet.pkg` and `SHA256SUMS`. CI runs on pushes
+to `main`, pull requests, and manual dispatch using GitHub-hosted arm64
+`macos-15`. It runs offline tests, builds and verifies the package, and uploads
+the artifact; it does not install the package or publish releases.
+
+## Permissions and validation limits
+
+The package targets `/Applications/BostoTablet.app`. For manual use, launch the
+app, select the display, and press **Enable**. macOS Input Monitoring and
+Accessibility permissions are needed for device access and event posting;
+grant them to BostoTablet in System Settings when requested, then retry Enable.
+Unsigned/unnotarized distribution remains subject to macOS Gatekeeper checks.
+
+CI does not launch the GUI, access live HID devices, post live input, install the
+package, or change permissions. Offline tests and package verification do not
+establish real-device behavior, drawing-app pressure or shortcut acceptance,
+gesture routing, display mapping, lifecycle cleanup, or installer/first-launch
+behavior. Physical validation is still required. See
+[UnifiedDriver details](UnifiedDriver/README.md) for protocol, controls, and the
+validation checklist, and [Multitouch details](Multitouch/README.md) for touch
+protocol and regression instructions.
+
+## License and reference
+
+This publication retains the [GNU AGPL v3 license](LICENSE).
+[georgejecook/BostoTabletDriverMac](https://github.com/georgejecook/BostoTabletDriverMac)
+is acknowledged as an upstream reference. Its unlicensed legacy source and
+history are not carried over here; no legacy binaries are included.

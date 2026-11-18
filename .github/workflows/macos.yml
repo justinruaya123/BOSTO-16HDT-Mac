@@ -1,0 +1,43 @@
+name: macOS package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      BT_LIVE_TESTS: '0'
+    steps:
+      - name: Require Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run offline tests
+        run: bash UnifiedDriver/test.sh
+      - name: Run Multitouch regressions
+        run: bash UnifiedDriver/regression.sh
+      - name: Build package
+        run: bash UnifiedDriver/build.sh
+      - name: Verify package offline
+        run: bash UnifiedDriver/verify.sh
+      - name: Generate SHA-256
+        working-directory: build/unified
+        run: shasum -a 256 BostoTablet.pkg > SHA256SUMS
+      - name: Upload package and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: BostoTablet-arm64
+          path: |
+            build/unified/BostoTablet.pkg
+            build/unified/SHA256SUMS
+          if-no-files-found: error

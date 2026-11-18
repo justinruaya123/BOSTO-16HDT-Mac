@@ -1,0 +1,201 @@
+// Test-owned HID, permission and posting boundaries; never call a live device.
+#import <Foundation/Foundation.h>
+static double fakeUptime=100;
+@interface UPTestProcessInfo : NSObject
++ (instancetype)processInfo;
+- (NSTimeInterval)systemUptime;
+@end
+@implementation UPTestProcessInfo
++ (instancetype)processInfo {static UPTestProcessInfo *info; if(!info)info=[self new];return info;}
+- (NSTimeInterval)systemUptime {return fakeUptime;}
+@end
+#define NSProcessInfo UPTestProcessInfo
+#define IOHIDManagerCreate FakeManager
+#define IOHIDManagerSetDeviceMatching FakeMatch
+#define IOHIDManagerCopyDevices FakeDevices
+#define IOHIDManagerRegisterDeviceRemovalCallback FakeRemoval
+#define IOHIDManagerRegisterDeviceMatchingCallback FakeAdded
+#define IOHIDManagerScheduleWithRunLoop FakeManagerSchedule
+#define IOHIDManagerUnscheduleFromRunLoop FakeManagerUnschedule
+#define IOHIDDeviceGetProperty FakeProperty
+#define IOHIDDeviceOpen FakeOpen
+#define IOHIDDeviceClose FakeClose
+#define IOHIDDeviceRegisterInputReportCallback FakeReport
+#define IOHIDDeviceRegisterRemovalCallback FakeDeviceRemoval
+#define IOHIDDeviceScheduleWithRunLoop FakeDeviceSchedule
+#define IOHIDDeviceUnscheduleFromRunLoop FakeDeviceUnschedule
+#define IOHIDCheckAccess FakeAccess
+#define CGPreflightPostEventAccess FakePostAccess
+#define CGDisplayIsActive FakeActive
+#define CGDisplayBounds FakeBounds
+#define CGEventPost FakePost
+#import "../UnifiedMonitor.m"
+#include <assert.h>
+static NSArray *devices;
+static NSDictionary *match;
+static IOHIDReportCallback callback;
+static void *callbackContext;
+static IOHIDDeviceCallback removal;
+static void *removalContext;
+static IOHIDCallback deviceRemoval;
+static void *deviceRemovalContext;
+static int opens,closes,posts,ups,exits,closesInsideCallback;
+static bool insideCallback;
+static int keyDowns,keyUps;
+static double postedPressure;
+
+static bool allowed=true;
+static IOReturn openResult=kIOReturnSuccess;
+IOHIDManagerRef FakeManager(CFAllocatorRef a,IOOptionBits o){(void)a;(void)o;return (IOHIDManagerRef)CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);}
+void FakeMatch(IOHIDManagerRef m,CFDictionaryRef d){(void)m;match=[(__bridge NSDictionary *)d copy];}
+CFSetRef FakeDevices(IOHIDManagerRef m){(void)m;return (__bridge_retained CFSetRef)[NSSet setWithArray:devices];}
+void FakeRemoval(IOHIDManagerRef m,IOHIDDeviceCallback cb,void *ctx){(void)m;removal=cb;removalContext=ctx;}
+void FakeAdded(IOHIDManagerRef m,IOHIDDeviceCallback cb,void *ctx){(void)m;(void)cb;(void)ctx;}
+void FakeManagerSchedule(IOHIDManagerRef m,CFRunLoopRef l,CFStringRef mode){(void)m;(void)l;assert(CFEqual(mode,kCFRunLoopCommonModes));}
+void FakeManagerUnschedule(IOHIDManagerRef m,CFRunLoopRef l,CFStringRef mode){(void)m;(void)l;(void)mode;}
+CFTypeRef FakeProperty(IOHIDDeviceRef d,CFStringRef key){return CFDictionaryGetValue((CFDictionaryRef)d,key);}
+IOReturn FakeOpen(IOHIDDeviceRef d,IOOptionBits o){assert(exact(d));assert(o==kIOHIDOptionsTypeSeizeDevice);opens++;return openResult;}
+IOReturn FakeClose(IOHIDDeviceRef d,IOOptionBits o){assert(exact(d));assert(o==kIOHIDOptionsTypeSeizeDevice);if(insideCallback)closesInsideCallback++;closes++;return 0;}
+void FakeReport(IOHIDDeviceRef d,uint8_t *buf,CFIndex n,IOHIDReportCallback cb,void *ctx){(void)d;(void)buf;assert(n==8);callback=cb;callbackContext=ctx;}
+void FakeDeviceRemoval(IOHIDDeviceRef d,IOHIDCallback cb,void *ctx){(void)d;deviceRemoval=cb;deviceRemovalContext=ctx;}
+void FakeDeviceSchedule(IOHIDDeviceRef d,CFRunLoopRef l,CFStringRef mode){(void)d;(void)l;assert(CFEqual(mode,kCFRunLoopCommonModes));}
+void FakeDeviceUnschedule(IOHIDDeviceRef d,CFRunLoopRef l,CFStringRef mode){(void)d;(void)l;(void)mode;}
+IOHIDAccessType FakeAccess(IOHIDRequestType type){(void)type;return allowed?kIOHIDAccessTypeGranted:kIOHIDAccessTypeDenied;}
+bool FakePostAccess(void){return allowed;}
+boolean_t FakeActive(CGDirectDisplayID d){return d==7;}
+CGRect FakeBounds(CGDirectDisplayID d){(void)d;return CGRectMake(-1920,0,1920,1080);}
+void FakePost(CGEventTapLocation tap,CGEventRef event){(void)tap;posts++;
+    if(CGEventGetType(event)==kCGEventKeyDown){keyDowns++;assert(CGEventGetFlags(event)==kCGEventFlagMaskCommand);}
+    if(CGEventGetType(event)==kCGEventKeyUp){keyUps++;assert(CGEventGetFlags(event)==0);}
+    if(CGEventGetType(event)==kCGEventLeftMouseDragged || CGEventGetType(event)==kCGEventLeftMouseDown)postedPressure=CGEventGetDoubleValueField(event,kCGTabletEventPointPressure);
+    if(CGEventGetType(event)==kCGEventLeftMouseUp)ups++;if(CGEventGetType(event)==kCGEventTabletProximity && !CGEventGetIntegerValueField(event,kCGTabletProximityEventEnterProximity))exits++;}
+static void drainMain(void) {
+    __block bool done=false;dispatch_async(dispatch_get_main_queue(),^{done=true;});
+    double until=CFAbsoluteTimeGetCurrent()+1;
+    while(!done && CFAbsoluteTimeGetCurrent()<until)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,false);
+    assert(done);
+}
+static void deliver(uint8_t flags){uint8_t b[]={1,flags,0,0x23,0,0x14,0,0x10};assert(callback);callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,b,8);}
+int main(void){@autoreleasepool{
+    NSDictionary *pen=@{@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2};devices=@[pen];
+    [BTPenMonitor configureDisplay:7 pressureExponent:1];BTPenMonitor *m=[BTPenMonitor new];
+    assert(opens==0);assert([m startWithError:NULL]);assert(m.presence==BTPenUnknown);assert([match[@kIOHIDPrimaryUsageKey] isEqual:@2]);
+    __block BTPenPresence seen=BTPenUnknown;m.presenceChanged=^(BTPenPresence p){seen=p;};
+    deliver(0x11);assert(seen==BTPenInRange);assert(posts==2);[m stop];drainMain();assert(ups==1 && exits==1 && closes==1);[m stop];drainMain();assert(closes==1);
+    assert([m startWithError:NULL]);deliver(0x11);assert(removal && removalContext);deviceRemoval(deviceRemovalContext,0,(__bridge void *)pen);drainMain();assert(!m.running && seen==BTPenUnknown);assert(ups==2 && exits==2 && closes==2);
+    assert([m startWithError:NULL]);deliver(0x11);allowed=false;[m tick:nil];drainMain();assert(!m.running);assert(ups==3 && exits==3 && closes==3);
+    int before=opens;assert(![m startWithError:NULL]);drainMain();assert(opens==before);allowed=true;
+    openResult=kIOReturnExclusiveAccess;assert(![m startWithError:NULL]);drainMain();assert(closes==4);openResult=0;
+    devices=@[];before=opens;assert(![m startWithError:NULL]);drainMain();assert(opens==before);
+    NSMutableDictionary *wrong=[pen mutableCopy];wrong[@kIOHIDProductIDKey]=@0x782c;devices=@[wrong];assert(![m startWithError:NULL]);drainMain();assert(opens==before);
+    wrong[@kIOHIDProductIDKey]=@0x7821;wrong[@kIOHIDPrimaryUsagePageKey]=@1;assert(![m startWithError:NULL]);drainMain();assert(opens==before);
+    devices=@[pen];assert([m startWithError:NULL]);deliver(0);assert(seen==BTPenOutOfRange);deliver(0x11);
+    uint8_t malformed[]={1,0x11};callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,malformed,2);drainMain();assert(!m.running);assert(ups==4 && exits==4 && closes==5);
+    assert([m startWithError:NULL]);
+    __block BTGestureState gestures={0};assert(BTGestureInit(&gestures,BTGestureDefaultConfig()));assert(gestures.config.resumeDelay==2);
+    __block double time=10;
+    m.presenceChanged=^(BTPenPresence presence){BTGestureBatch batch={0};assert(BTGestureHandlePen(&gestures,(BTGesturePenInput){presence,time},&batch));};
+    deliver(0x10);time=11;deliver(0);assert(gestures.penOutAt==11);time=12;deliver(0);assert(gestures.penOutAt==11);
+    BTGestureBatch touchBatch={0};BTGestureTouchInput touch={.frame={.count=1,.contacts={{.identifier=1,.x=100,.y=100}}},.bounds={0,0,1920,1080},.time=12.99};
+    assert(BTGestureHandleTouch(&gestures,touch,&touchBatch));assert(touchBatch.count==0);
+    touch.frame.count=0;touch.time=13;assert(BTGestureHandleTouch(&gestures,touch,&touchBatch));
+    touch.frame.count=1;touch.time=13.1;assert(BTGestureHandleTouch(&gestures,touch,&touchBatch));
+    assert(BTGestureTick(&gestures,13.5,&touchBatch));assert(touchBatch.count>0 && touchBatch.events[0].kind==BTGesturePointerDown);
+    [m stop];drainMain();
+    // Silence expires only a posted held tip, measured from the last valid report 1.
+    m.presenceChanged=nil;fakeUptime=1000;assert([m startWithError:NULL]);deliver(0x10);
+    fakeUptime=1010;[m tick:nil];drainMain();assert(m.running); // Mere hover must not expire.
+    deliver(0x11);fakeUptime=1011;deliver(0x11); // A valid stationary tip report refreshes.
+    fakeUptime=1012.9;uint8_t unrelated[]={2,0};callback(callbackContext,0,NULL,kIOHIDReportTypeInput,2,unrelated,2);
+    fakeUptime=1012.999;[m tick:nil];drainMain();assert(m.running);
+    int oldUps=ups,oldExits=exits,oldCloses=closes;fakeUptime=1013;[m tick:nil];drainMain();
+    assert(!m.running && ups==oldUps+1 && exits==oldExits+1 && closes==oldCloses+1);
+    assert([m.snapshot[@"heldTipTimeouts"] unsignedIntValue]==1);
+    [m tick:nil];drainMain();[m stop];drainMain();assert(ups==oldUps+1 && exits==oldExits+1 && closes==oldCloses+1);
+    // Real main queue: callback teardown must be deferred, with output blocked now.
+    assert([m startWithError:NULL]);deliver(0x11);oldCloses=closes;oldUps=ups;oldExits=exits;int oldPosts=posts;
+    __block bool ownerStopped=false;
+    id failureObserver=[NSNotificationCenter.defaultCenter addObserverForName:UPFailureNotification object:m queue:nil usingBlock:^(NSNotification *note){(void)note;ownerStopped=true;}];
+    m.presenceChanged=^(BTPenPresence presence){if(presence==BTPenUnknown)assert(ownerStopped);};
+    insideCallback=true;callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,malformed,2);insideCallback=false;
+    [NSNotificationCenter.defaultCenter removeObserver:failureObserver];m.presenceChanged=nil;
+    assert(!m.running && closesInsideCallback==0 && closes==oldCloses && posts==oldPosts);
+    NSString *reason=m.status;
+    assert(![m startWithError:NULL]); // No new session may overtake deferred cleanup.
+    deliver(0x11);assert(posts==oldPosts);
+    drainMain();assert(closes==oldCloses+1 && ups==oldUps+1 && exits==oldExits+1);
+    assert([m.status isEqual:reason]);
+    assert([m startWithError:NULL]);drainMain();assert(m.running); // No stale stop.
+    [m stop];drainMain();
+    // Real monitor integration: only accepted packets produce edges, with no reopen
+    // for pressure changes. All posting still terminates at FakePost above.
+    NSArray *valid=@[@{@"key":@6,@"modifiers":@(kCGEventFlagMaskCommand)},@{@"key":@7,@"modifiers":@(kCGEventFlagMaskCommand)}];
+    assert(([UPValidatedBindings(nil) isEqual:@[NSNull.null,NSNull.null]]));
+    for(id bad in @[@"bad",@[@{}],@[@{@"key":@6.5,@"modifiers":@0},@{@"key":@55,@"modifiers":@0}],@[@{@"key":@6,@"modifiers":@(-1)},@{@"key":@6,@"modifiers":@0.5}]])
+        assert(([UPValidatedBindings(bad) isEqual:@[NSNull.null,NSNull.null]]));
+    [BTPenMonitor updateShortcutBindings:valid];
+    assert([m startWithError:NULL]);assert([m.snapshot[@"pressureState"] isEqual:@"noData"]);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0);
+    before=opens;deliver(0x17);assert(keyDowns==0); // Unknown initial held state.
+    assert(fabs(postedPressure-0.5)<0.0001);
+    [BTPenMonitor updatePressureExponent:2];
+    fprintf(stderr,"pressure after slider, before packet: expected 0.5, actual %.8f\n",[m.snapshot[@"effectivePressure"] doubleValue]);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0.5);
+    deliver(0x17);
+    fprintf(stderr,"pressure fresh packet: expected 0.25, meter %.8f, native event %.8f\n",[m.snapshot[@"effectivePressure"] doubleValue],postedPressure);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0.25);
+    assert(fabs(postedPressure-[m.snapshot[@"effectivePressure"] doubleValue])<0.0001 && opens==before);
+    assert([m.snapshot[@"rawPressure"] intValue]==4096);
+    deliver(0x10);assert([m.snapshot[@"rawPressure"] intValue]==0);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0);
+    [BTPenMonitor updatePressureExponent:0.5];assert([m.snapshot[@"effectivePressure"] doubleValue]==0);
+    deliver(0);assert([m.snapshot[@"effectivePressure"] doubleValue]==0);
+    [BTPenMonitor updatePressureExponent:2];
+    deliver(0x17);assert(keyDowns==0); // Return to proximity already held.
+    deliver(0x11);deliver(0x17);assert(keyDowns==2 && keyUps==2);
+    deliver(0x17);deliver(0x11);assert(keyDowns==2);
+#define REVIEW_KEYS(name,expected) do { \
+    fprintf(stderr,"%s: expected %d pairs, down %d up %d\n",name,expected,keyDowns,keyUps); \
+    assert(keyDowns==(expected) && keyUps==(expected)); \
+} while(0)
+    // Capture observes a release. The first genuine press after ending must fire.
+    [BTPenMonitor setShortcutCapture:YES];deliver(0x17);deliver(0x11);
+    REVIEW_KEYS("capture suppresses presses and observes release",2);
+    [BTPenMonitor setShortcutCapture:NO];REVIEW_KEYS("capture end emits nothing",2);
+    deliver(0x17);REVIEW_KEYS("capture released -> next press",4);
+    // Last observation held: ending capture and held reports cannot retrigger.
+    [BTPenMonitor setShortcutCapture:YES];deliver(0x17);
+    [BTPenMonitor setShortcutCapture:NO];deliver(0x17);REVIEW_KEYS("capture held -> held",4);
+    deliver(0x11);REVIEW_KEYS("capture held -> release",4);
+    deliver(0x17);REVIEW_KEYS("capture held -> release -> press",6);
+    // No reports during capture: preserve the previously known released state.
+    deliver(0x11);[BTPenMonitor setShortcutCapture:YES];[BTPenMonitor setShortcutCapture:NO];
+    deliver(0x17);REVIEW_KEYS("capture no packets, known released -> press",8);
+    // Binding edits preserve known released and held observations in the same way.
+    deliver(0x11);[BTPenMonitor updateShortcutBindings:valid];REVIEW_KEYS("rebind released emits nothing",8);
+    deliver(0x17);REVIEW_KEYS("rebind released -> next press",10);
+    [BTPenMonitor updateShortcutBindings:valid];deliver(0x17);REVIEW_KEYS("rebind held -> held",10);
+    deliver(0x11);REVIEW_KEYS("rebind held -> release",10);
+    deliver(0x17);REVIEW_KEYS("rebind held -> release -> press",12);
+    deliver(0x1f);REVIEW_KEYS("tool change held",12);
+    deliver(0x19);deliver(0x1f);REVIEW_KEYS("new tool released -> press",14);
+    deliver(0);[BTPenMonitor updateShortcutBindings:valid];
+    deliver(0x17);REVIEW_KEYS("proximity return held after edit",14);
+    callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,malformed,2);drainMain();
+    assert(!m.running);REVIEW_KEYS("invalid packet and cleanup",14);
+    assert([m.snapshot[@"pressureState"] isEqual:@"inactive"]);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0);
+    assert([m.snapshot[@"rawPressure"] intValue]==0);
+    assert([m.snapshot[@"shortcutPairs"] intValue]==14);
+    assert(([m.snapshot[@"sideButtonPresses"] isEqual:@[@7,@7]]));
+    [m stop];drainMain();REVIEW_KEYS("repeated stop",14);
+    assert([m startWithError:NULL]);
+    [BTPenMonitor setShortcutCapture:YES];[BTPenMonitor setShortcutCapture:NO];[BTPenMonitor updateShortcutBindings:valid];
+    deliver(0x17);REVIEW_KEYS("unknown initial state after capture and rebind",14);
+    [m stop];drainMain();
+    [BTPenMonitor updateShortcutBindings:nil];[BTPenMonitor updatePressureExponent:1];
+    assert([m startWithError:NULL]);deliver(0x10);deliver(0x17);REVIEW_KEYS("unassigned bindings",14);
+    [m stop];drainMain();
+#undef REVIEW_KEYS
+    puts("Unified monitor exact-device, shared presence and cleanup checks passed (fake HID/posting).");
+}return 0;}
