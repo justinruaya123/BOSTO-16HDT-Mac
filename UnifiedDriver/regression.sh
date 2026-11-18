@@ -8,4 +8,4 @@ cd build/unified-regression
 export TMPDIR="$PWD/scratch"
 # Unchanged test script, isolated so its hardcoded build output stays in scope.
 BT_LIVE_TESTS=0 bash Multitouch/test.sh > results.log 2>&1
-rg 'checks,|— PASS' results.log
+/usr/bin/grep -E 'checks,|— PASS' results.log
