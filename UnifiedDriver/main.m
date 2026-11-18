@@ -9,12 +9,18 @@
 #import "ShortcutEditor.h"
 #import "SetupState.h"
 #import "UpdateController.h"
+#import "PenBattery.h"
+#import "BatteryNotifications.h"
+#import "MenuIcon.h"
 static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField labelWithString:text];v.frame=r;return v;}
 @interface UPApp : NSObject<NSApplicationDelegate,NSWindowDelegate,NSTabViewDelegate> { BOOL _launchAttempted; }
 @property(nonatomic,strong) BTTouchController *touch;
 @property(nonatomic,strong) NSWindow *window;
 @property(nonatomic,strong) NSStatusItem *item;
 @property(nonatomic,strong) UPUpdateController *updater;
+@property(nonatomic,strong) UPBatteryNotifications *batteryNotifications;
+@property(nonatomic,strong) NSTextField *batteryLabel;
+@property(nonatomic,strong) NSMenuItem *batteryMenu;
 @property(nonatomic,strong) NSPopUpButton *displays;
 @property(nonatomic,strong) NSTextField *delay,*status,*pressureDescription,*tester;
 @property(nonatomic,strong) NSSlider *pressureSlider;
@@ -47,8 +53,15 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,700,550) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     self.window.title=@"BostoTablet";self.window.releasedWhenClosed=NO;self.window.delegate=self;
     [self composeControlsInView:self.window.contentView resumeDelay:self.touch.resumeDelay];
-    self.item=[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];self.item.button.title=@"Bosto Off";
-    NSMenu *menu=[NSMenu new];NSMenuItem *show=[menu addItemWithTitle:@"Show BostoTablet" action:@selector(show:) keyEquivalent:@""];show.target=self;
+    self.item=[NSStatusBar.systemStatusBar statusItemWithLength:28];
+    __weak UPApp *owner=self;
+    self.batteryNotifications=[[UPBatteryNotifications alloc]initWithReading:^NSNumber *{
+        UPApp *app=owner;if(!app || !app.touch.running || app.failure ||
+            IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted || !CGPreflightPostEventAccess())return nil;
+        return UPBatteryPercent(app.touch.snapshot[@"penObserver"][@"batteryPercent"]);
+    }];
+    NSMenu *menu=[NSMenu new];
+    self.batteryMenu=[menu addItemWithTitle:UPBatteryDescription(nil) action:nil keyEquivalent:@""];NSMenuItem *show=[menu addItemWithTitle:@"Show BostoTablet" action:@selector(show:) keyEquivalent:@""];show.target=self;
     NSMenuItem *stop=[menu addItemWithTitle:@"Disable pen and touch" action:@selector(disable:) keyEquivalent:@""];stop.target=self;
     self.updater=[UPUpdateController new];
     NSMenuItem *updates=[menu addItemWithTitle:@"Check for Updates…" action:@selector(checkForUpdates:) keyEquivalent:@""];updates.target=self.updater;
@@ -93,6 +106,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.diagnostics=[[NSTextView alloc]initWithFrame:scroll.bounds];self.diagnostics.editable=NO;self.diagnostics.font=[NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];scroll.documentView=self.diagnostics;[dv addSubview:scroll];
     NSTabViewItem *pen=[[NSTabViewItem alloc]initWithIdentifier:@"pen"];pen.label=@"Pen";[tabs addTabViewItem:pen];
     NSView *pv=[[NSView alloc]initWithFrame:v.frame];pen.view=pv;
+    self.batteryLabel=label(UPBatteryDescription(nil),NSMakeRect(20,300,620,24));[pv addSubview:self.batteryLabel];
     [pv addSubview:label(@"Pressure sensitivity",NSMakeRect(20,440,600,28))];
     [pv addSubview:label(@"Softer                         Linear                         Firmer",NSMakeRect(20,395,600,24))];
     self.pressureSlider=[NSSlider sliderWithValue:log2(self.exponent) minValue:-2 maxValue:2 target:self action:@selector(changePressure:)];
@@ -253,7 +267,6 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     if(!self.touch || !self.enable)return;
     (void)timer;BOOL running=self.touch.running;
     [self refreshLoginStatus];
-    self.item.button.title=running?@"Bosto On":@"Bosto Off";
     self.delay.enabled=self.displays.enabled=!running;
     self.pressureDescription.stringValue=[NSString stringWithFormat:@"Curve exponent %.2f%@",self.exponent,self.exponent==1?@" — linear (default)":@""];
     NSMutableDictionary *state=[self.touch.snapshot mutableCopy];
@@ -262,6 +275,13 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     BOOL post=CGPreflightPostEventAccess();
     self.enable.title=running?@"Disable pen and touch":!listen?@"Request Input Monitoring…":!post?@"Request Accessibility…":@"Enable pen and touch";
     self.enable.enabled=!self.checkingPermission;
+    UPMenuState menuState=UPSetupMenuState(state,listen,post,self.failure!=nil);
+    NSString *description=menuState==UPMenuPen?@"BostoTablet: pen in range or palm cooldown":menuState==UPMenuTouch?@"BostoTablet: touch gestures ready":@"BostoTablet: unavailable — check setup";
+    self.item.button.image=UPMenuIcon(menuState);
+    self.item.button.toolTip=description;[self.item.button setAccessibilityLabel:description];
+    NSNumber *battery=running && listen && post && !self.failure && [state[@"penObserver"][@"running"] boolValue]?UPBatteryPercent(state[@"penObserver"][@"batteryPercent"]):nil;
+    self.batteryLabel.stringValue=self.batteryMenu.title=UPBatteryDescription(battery);
+    [self.batteryNotifications refresh];
     NSDictionary *setup=UPSetupStatus(state,listen,post);
     NSArray *keys=@[@"pen",@"touch",@"listen",@"post"];
     NSDictionary *colors=@{@"off":NSColor.secondaryLabelColor,@"waiting":NSColor.systemOrangeColor,@"active":NSColor.systemGreenColor};

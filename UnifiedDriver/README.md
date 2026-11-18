@@ -189,3 +189,22 @@ before another press can fire. Capture continues observing reports without
 emitting. Unknown initial state and tool/proximity transitions remain suppressed.
 The monitor fixture records pressure and button transition transcripts for
 offline validation.
+
+The app icon is original tablet/stylus artwork generated offscreen from
+`resources/GenerateIcon.m` using stock CoreGraphics, ImageIO and `iconutil`.
+`build.sh` packages only `Contents/Resources/BostoTablet.icns` before signing;
+`verify.sh` checks the resource allowlist and exact app/package bytes.
+The fixed-width menu symbol is `!` when unavailable, a pencil during pen proximity
+or palm cooldown, and a finger when the production gesture policy is ready.
+Lift-required palm state remains unavailable until the policy clears it.
+
+Pen battery is conditional: the Pen tab and menu show a percentage only if macOS
+publishes a valid numeric integer `BatteryPercent` (0–100, excluding booleans) on
+the already acquired exact 0ED1:7821 Digitizers 13:2 pen. Otherwise they show
+“unavailable”. The read-only inspection of that exact pen found zero power
+properties and no Digitizer Battery Strength (0x3B) in its 299-byte descriptor;
+actual 16HDT battery telemetry and notifications have not been demonstrated.
+No reports are guessed or probed. A valid reading below 20% can request native
+notification consent once per launch and produce one alert per low streak;
+20% or higher rearms it, while unknown readings preserve the latch. Consent
+completion rereads the pen and suppresses alerts for unavailable/high readings.

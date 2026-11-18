@@ -132,3 +132,10 @@ This publication retains the [GNU AGPL v3 license](LICENSE).
 [georgejecook/BostoTabletDriverMac](https://github.com/georgejecook/BostoTabletDriverMac)
 is acknowledged as an upstream reference. Its unlicensed legacy source and
 history are not carried over here; no legacy binaries are included.
+
+BostoTablet includes an original generated tablet/stylus app icon and a live
+menu symbol for unavailable, pen/cooldown, and gesture-ready states. Pen battery
+percentage and native low-battery alerts are conditional on macOS publishing a
+valid `BatteryPercent` on the exact acquired pen; current 16HDT inspection found
+no battery evidence, so “unavailable” is expected. See
+[UnifiedDriver/README.md](UnifiedDriver/README.md) for the conditions and build details.

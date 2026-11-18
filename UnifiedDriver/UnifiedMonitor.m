@@ -1,5 +1,6 @@
 #import "UnifiedMonitor.h"
 #import "UnifiedPen.h"
+#import "PenBattery.h"
 #import <IOKit/hid/IOHIDLib.h>
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import <os/log.h>
@@ -206,7 +207,9 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     _openAttempted=NO;_stopping=NO;self.presence=BTPenUnknown;
 }
 - (NSDictionary *)snapshot {
-    return @{@"running":@(self.running),@"stopping":@(_stopping),@"presence":self.presence==BTPenInRange?@"inRange":self.presence==BTPenOutOfRange?@"outOfRange":@"unknown",@"status":self.status?:@"",@"reports":@(_reports),@"ignoredReports":@(_ignored),@"seized":@(_device && _openAttempted),@"configurationWrites":@0,@"tipDown":@(_state.down),@"pressureExponent":@(pressureExponent),
+    // Only a property on the already acquired exact pen. Never probe reports.
+    NSNumber *battery=self.running && _device?UPBatteryPercent((__bridge id)IOHIDDeviceGetProperty(_device,CFSTR("BatteryPercent"))):nil;
+    return @{@"batteryPercent":battery?:NSNull.null,@"running":@(self.running),@"stopping":@(_stopping),@"presence":self.presence==BTPenInRange?@"inRange":self.presence==BTPenOutOfRange?@"outOfRange":@"unknown",@"status":self.status?:@"",@"reports":@(_reports),@"ignoredReports":@(_ignored),@"seized":@(_device && _openAttempted),@"configurationWrites":@0,@"tipDown":@(_state.down),@"pressureExponent":@(pressureExponent),
         @"pressureState":!self.running?@"inactive":!_hasPacket?@"noData":!_acceptedPacket.inRange?@"outOfRange":_acceptedPacket.tip?@"tipDown":@"tipUp",
         @"rawPressure":@(self.running && _hasPacket && _acceptedPacket.inRange && _acceptedPacket.tip?_acceptedPacket.pressure:0),
         @"effectivePressure":@(self.running && _hasPacket?_effectivePressure:0),

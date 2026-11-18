@@ -411,7 +411,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
              @"firmwareReport":@[@(_firmware[0]),@(_firmware[1]),@(_firmware[2])],@"configurationWrites":@(_configurationWrites),@"touchConfigurationAccepted":@(_touchConfigurationAccepted),
              @"pointerDown":@(_heldEvent.phase!=BTGesturePhaseNone && (_heldEvent.kind==BTGesturePointerDown || _heldEvent.kind==BTGesturePointerDrag)),
              @"downEvents":@(_downs),@"dragEvents":@(_drags),@"upEvents":@(_ups),@"scrollEvents":@(_scrollEvents),@"magnifyEvents":@(_magnifyEvents),@"cancelEvents":@(_cancelEvents),
-             @"gestureMode":@(_gestures.mode),@"resumeDelay":@(self.resumeDelay),@"report4Seen":@(_report4Seen),
+             @"gestureReadiness":@(self.running?BTGestureGetReadiness(&_gestures,now()):BTGestureReadinessUnknown),@"gestureMode":@(_gestures.mode),@"resumeDelay":@(self.resumeDelay),@"report4Seen":@(_report4Seen),
              @"cursorQuartz":@[@(_gestures.x),@(_gestures.y)],@"postsMouseEvents":@(_postEvents),@"postsGestureEvents":@(_postEvents),
              @"penObserver":_penMonitor.snapshot?:@{},@"penAccessed":@(_penMonitor.running),@"penSeized":@NO};
 }

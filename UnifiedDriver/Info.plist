@@ -3,6 +3,7 @@
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>BostoTablet</string>
 <key>CFBundleIdentifier</key><string>local.BostoTablet</string>
+<key>CFBundleIconFile</key><string>BostoTablet.icns</string>
 <key>CFBundleName</key><string>BostoTablet</string>
 <key>CFBundleDisplayName</key><string>BostoTablet</string>
 <key>CFBundlePackageType</key><string>APPL</string>
