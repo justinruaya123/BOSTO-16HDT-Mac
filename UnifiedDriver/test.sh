@@ -11,3 +11,9 @@ xcrun clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror -g -fsanitize=
 build/unified-tests/test_monitor
 xcrun clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror -g -fsanitize=undefined,bounds -IUnifiedDriver -IMultitouch Multitouch/BT16TouchEvents.m Multitouch/BTGestureEvents.m UnifiedDriver/tests/test_controller.m build/unified-tests/gestures.o build/unified-tests/touch.o -framework Cocoa -framework IOKit -framework ApplicationServices -o build/unified-tests/test_controller
 build/unified-tests/test_controller
+xcrun clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror -g -fsanitize=undefined,bounds -IUnifiedDriver -IMultitouch UnifiedDriver/SetupState.m UnifiedDriver/tests/test_setup.m -framework Foundation -o build/unified-tests/test_setup
+build/unified-tests/test_setup
+xcrun clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror -g -fsanitize=undefined,bounds -IUnifiedDriver UnifiedDriver/UpdatePolicy.m UnifiedDriver/tests/test_updates.m -framework Foundation -o build/unified-tests/test_updates
+build/unified-tests/test_updates
+xcrun clang -arch arm64 -fobjc-arc -fblocks -Wall -Wextra -Werror -g -fsanitize=undefined,bounds -IUnifiedDriver UnifiedDriver/UpdatePolicy.m UnifiedDriver/tests/test_update_io.m -framework Cocoa -o build/unified-tests/test_update_io
+build/unified-tests/test_update_io

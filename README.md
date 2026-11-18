@@ -47,6 +47,15 @@ Outputs are `build/unified/BostoTablet.app` and `build/unified/BostoTablet.pkg`.
 The app is ad hoc signed; the installer package is unsigned and neither is
 notarized. No signing credentials are required.
 
+Use the BostoTablet menu bar item’s **Check for Updates…** to check manually,
+even before tablet permissions are granted. There are no background checks.
+After confirmation, a newer stable package is size/SHA-256 verified against
+GitHub’s asset metadata, saved without overwriting in a unique Downloads folder,
+quarantined, and revealed in Finder. It is never opened or installed automatically.
+Quit BostoTablet before opening the package in Installer; you may need to
+reapprove Input Monitoring and Accessibility permissions. The package remains
+unsigned and unnotarized, subject to macOS security checks.
+
 For a CI build, open [Actions → macOS package](https://github.com/justinruaya123/BOSTO-16HDT-Mac/actions/workflows/macos.yml),
 select a successful run for the intended commit, and download the
 `BostoTablet-arm64` artifact. Extract it, then verify from that directory:

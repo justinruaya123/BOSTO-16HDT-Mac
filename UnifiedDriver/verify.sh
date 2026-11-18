@@ -19,12 +19,13 @@ a=root/'BostoTablet.app'
 b=root/'verified-package/Payload/BostoTablet.app'
 info=plistlib.loads((a/'Contents/Info.plist').read_bytes())
 assert info['CFBundleIdentifier']=='local.BostoTablet'
-assert info['CFBundleShortVersionString']=='0.1.3'
-assert info['CFBundleVersion']=='5'
+assert info['CFBundleShortVersionString']=='0.1.4'
+assert info['CFBundleVersion']=='9'
+assert info['LSFileQuarantineEnabled'] is True
 assert info['CFBundleExecutable']=='BostoTablet'
 assert not info.get('LSBackgroundOnly',False)
 pkg=ET.parse(root/'verified-package/PackageInfo').getroot()
-assert pkg.attrib['version']=='0.1.3'
+assert pkg.attrib['version']=='0.1.4'
 assert pkg.attrib['install-location']=='/Applications'
 assert pkg.attrib['relocatable']=='false'
 assert pkg.attrib['postinstall-action']=='none'
