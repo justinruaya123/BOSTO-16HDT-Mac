@@ -55,6 +55,13 @@ static bool clockStep(BTGestureState *s,double time,BTGestureBatch *b) {
 static bool suppressed(const BTGestureState *s,double time) {
     return s->pen!=BTPenOutOfRange || (s->penOutSeen && time-s->penOutAt<s->config.resumeDelay);
 }
+BTGestureReadiness BTGestureGetReadiness(const BTGestureState *s,double time) {
+    if(!s || !s->clockValid || !isfinite(time) || time<s->lastTime || s->pen==BTPenUnknown)
+        return BTGestureReadinessUnknown;
+    if(suppressed(s,time))return BTGestureReadinessPen;
+    if(s->mode==BTGestureBlocked)return BTGestureReadinessLiftRequired;
+    return BTGestureReadinessReady;
+}
 static bool suppressOutput(BTGestureState *s,BTGestureBatch *b) {
     bool result=finish(s,b,BTGesturePhaseCancelled);
     s->mode=s->lastCount?BTGestureBlocked:BTGestureIdle;return result;

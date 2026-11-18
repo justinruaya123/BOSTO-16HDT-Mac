@@ -3,7 +3,9 @@
 BostoTablet is an Apple Silicon-only userspace driver for the exact Bosto
 BT-16HDT interfaces below. `UnifiedDriver/` is the current app and package;
 `Multitouch/` supplies its touch implementation and regression suite. The app
-combines pen and touch controls, starts disabled, and has no autostart service.
+combines pen and touch controls, attempts permission-gated startup once for the
+saved display or a unique nonmirrored Bosto Tablet display, and offers optional
+Open at Login on macOS 13 and later.
 Intel Macs and legacy binaries are outside this publication's scope.
 
 ## Device scope
@@ -69,15 +71,43 @@ to `main`, pull requests, and manual dispatch using GitHub-hosted arm64
 `macos-15`. It runs offline tests, builds and verifies the package, and uploads
 the artifact; it does not install the package.
 
-Pushing an exact `vMAJOR.MINOR.PATCH` tag (for example, `v0.1.3`) also runs this
-workflow. Before uploading, the macOS job requires the tag version to match
-the verified app's `CFBundleShortVersionString`; package verification also
-checks the `PackageInfo` version and packaged payload. Only a successful tag
-push can publish: a separate Ubuntu job downloads that run's
-`BostoTablet-arm64` artifact, verifies `SHA256SUMS`, and creates a stable GitHub
-Release marked latest with only `BostoTablet.pkg` and `SHA256SUMS` attached.
-Existing releases are not overwritten. Pull requests, manual runs, and pushes
-to `main` provide CI artifacts only.
+Every successful trusted push to `main`, including a PR merge, automatically
+publishes a stable patch release. The entire workflow is serialized for main
+pushes using `queue: max`, without cancelling runs in progress. Pull requests
+and manual dispatch use separate concurrency groups and only test, build,
+verify, and upload artifacts. Tag pushes do not trigger publication.
+
+Version selection uses fetched tags resolved to their actual commits. It takes
+the highest canonical numeric `vMAJOR.MINOR.PATCH` tag and increments its patch;
+prereleases and malformed tags are ignored. The source
+`UnifiedDriver/Info.plist` version is a minimum for planned major/minor changes,
+and is used directly when no stable tags exist. With latest tag `v0.1.3` and
+source version `0.1.4`, the next release is `v0.1.4`. A rerun reuses the stable
+tag already pointing to that commit, even if newer tags exist.
+
+The selected version is stamped into the built app and package only; the tracked
+plist is untouched. Local, PR, and manual builds default to the source version.
+For an explicit local override, pass the same canonical version to both scripts:
+
+```sh
+BT_VERSION=0.2.0 bash UnifiedDriver/build.sh
+BT_VERSION=0.2.0 bash UnifiedDriver/verify.sh
+```
+
+Only the separate release job has `contents: write`. Without checking out source,
+it downloads that run's verified `BostoTablet-arm64` artifact, checks
+`SHA256SUMS`, and creates the tag explicitly at the verified build commit if
+absent. Existing lightweight or annotated tags must resolve to that exact
+commit; conflicting or unresolvable tags fail publication and are never moved.
+The job uses `gh release create --verify-tag` to publish a stable release marked
+latest with the raw `BostoTablet.pkg` and `SHA256SUMS`, including the unsigned
+installer warning. An existing release is left unchanged.
+
+Release version policy tests are offline:
+
+```sh
+python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
+```
 
 ## Permissions and validation limits
 
@@ -102,3 +132,10 @@ This publication retains the [GNU AGPL v3 license](LICENSE).
 [georgejecook/BostoTabletDriverMac](https://github.com/georgejecook/BostoTabletDriverMac)
 is acknowledged as an upstream reference. Its unlicensed legacy source and
 history are not carried over here; no legacy binaries are included.
+
+BostoTablet includes an original generated tablet/stylus app icon and a live
+menu symbol for unavailable, pen/cooldown, and gesture-ready states. Pen battery
+percentage and native low-battery alerts are conditional on macOS publishing a
+valid `BatteryPercent` on the exact acquired pen; current 16HDT inspection found
+no battery evidence, so “unavailable” is expected. See
+[UnifiedDriver/README.md](UnifiedDriver/README.md) for the conditions and build details.

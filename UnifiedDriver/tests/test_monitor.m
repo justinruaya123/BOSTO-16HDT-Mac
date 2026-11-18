@@ -197,5 +197,14 @@ int main(void){@autoreleasepool{
     assert([m startWithError:NULL]);deliver(0x10);deliver(0x17);REVIEW_KEYS("unassigned bindings",14);
     [m stop];drainMain();
 #undef REVIEW_KEYS
+    NSMutableDictionary *batteryPen=[pen mutableCopy];devices=@[batteryPen];
+    assert([m startWithError:NULL]);int batteryOpens=opens;
+    assert(m.snapshot[@"batteryPercent"]==NSNull.null);
+    batteryPen[@"BatteryPercent"]=@19;assert([m.snapshot[@"batteryPercent"] isEqual:@19]);
+    batteryPen[@"BatteryPercent"]=@20;assert([m.snapshot[@"batteryPercent"] isEqual:@20]);
+    batteryPen[@"BatteryPercent"]=@YES;assert(m.snapshot[@"batteryPercent"]==NSNull.null);
+    batteryPen[@"BatteryPercent"]=@101;assert(m.snapshot[@"batteryPercent"]==NSNull.null);
+    batteryPen[@"BatteryPercent"]=@19;[m stop];assert(m.snapshot[@"batteryPercent"]==NSNull.null);
+    drainMain();assert(opens==batteryOpens);
     puts("Unified monitor exact-device, shared presence and cleanup checks passed (fake HID/posting).");
 }return 0;}

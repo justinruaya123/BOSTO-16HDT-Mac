@@ -28,6 +28,10 @@ typedef struct {
     size_t lastCount; uint8_t identifiers[2];
     double x,y,startX,startY,lastCx,lastCy,lastSpan,startSpan,anchorX,anchorY;
 } BTGestureState;
+typedef enum { BTGestureReadinessUnknown, BTGestureReadinessPen, BTGestureReadinessLiftRequired,
+               BTGestureReadinessReady } BTGestureReadiness;
+/* Read-only: same suppression boundary used by production output policy. */
+BTGestureReadiness BTGestureGetReadiness(const BTGestureState *state,double time);
 BTGestureConfig BTGestureDefaultConfig(void);
 bool BTGestureInit(BTGestureState *state,BTGestureConfig config);
 /* Always consume the batch, including cancellation output on rejected input. */

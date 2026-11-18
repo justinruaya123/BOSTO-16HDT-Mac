@@ -58,3 +58,6 @@ dkms.conf
 /build/
 *.pkg
 .DS_Store
+
+# Python bytecode
+__pycache__/

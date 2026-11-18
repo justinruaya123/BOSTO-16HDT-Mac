@@ -13,6 +13,21 @@ static BTGestureBatch touch(BTGestureState *s,BTTouchFrame f,double t){BTGesture
 static BTGestureBatch pen(BTGestureState *s,BTPenPresence p,double t){BTGestureBatch b;CHECK(BTGestureHandlePen(s,(BTGesturePenInput){p,t},&b));return b;}
 static void noDown(BTGestureBatch b){for(size_t i=0;i<b.count;i++)CHECK(b.events[i].kind!=BTGesturePointerDown);}
 int main(void){
+    BTGestureState probe;CHECK(BTGestureInit(&probe,BTGestureDefaultConfig()));
+    CHECK(BTGestureGetReadiness(&probe,0)==BTGestureReadinessUnknown);
+    (void)pen(&probe,BTPenInRange,1);
+    CHECK(BTGestureGetReadiness(&probe,1)==BTGestureReadinessPen);
+    (void)pen(&probe,BTPenOutOfRange,2);
+    CHECK(BTGestureGetReadiness(&probe,3.999)==BTGestureReadinessPen);
+    BTGestureState unchanged=probe;
+    CHECK(BTGestureGetReadiness(&probe,4)==BTGestureReadinessReady);
+    CHECK(probe.lastTime==unchanged.lastTime && probe.mode==unchanged.mode);
+    (void)touch(&probe,one(4000,4000),3);
+    CHECK(BTGestureGetReadiness(&probe,4)==BTGestureReadinessLiftRequired);
+    (void)touch(&probe,(BTTouchFrame){0},4);
+    CHECK(BTGestureGetReadiness(&probe,4)==BTGestureReadinessReady);
+    CHECK(BTGestureGetReadiness(&probe,NAN)==BTGestureReadinessUnknown);
+    CHECK(BTGestureGetReadiness(&probe,3)==BTGestureReadinessUnknown);
     BTGestureState s=ready();BTGestureBatch b=touch(&s,one(4000,4000),0);CHECK(b.count==0);
     b=touch(&s,(BTTouchFrame){0},0.03);CHECK(b.count==2);CHECK(b.events[0].kind==BTGesturePointerDown);CHECK(b.events[1].kind==BTGesturePointerUp);CHECK(s.mode==BTGestureIdle);
     CHECK(b.events[0].x<0);CHECK(b.events[0].y>=-124 && b.events[0].y<956);

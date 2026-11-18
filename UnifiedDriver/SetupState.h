@@ -1,4 +1,7 @@
 #import <Foundation/Foundation.h>
+#import "BTGestures.h"
+typedef NS_ENUM(NSUInteger, UPMenuState) { UPMenuUnavailable, UPMenuPen, UPMenuTouch };
+UPMenuState UPSetupMenuState(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault);
 
 typedef NS_ENUM(NSUInteger, UPEnableAction) {
     UPDisable, UPRequestInputMonitoring, UPRequestAccessibility, UPValidateDisplay

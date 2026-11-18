@@ -1,6 +1,18 @@
 #import "SetupState.h"
 #import "BTGestures.h"
 
+UPMenuState UPSetupMenuState(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
+    if(fault || !listenGranted || !postGranted || ![snapshot[@"running"] boolValue] ||
+       ![snapshot[@"penObserver"][@"running"] boolValue])return UPMenuUnavailable;
+    NSString *presence=snapshot[@"penObserver"][@"presence"];
+    if(![presence isEqual:@"inRange"] && ![presence isEqual:@"outOfRange"])return UPMenuUnavailable;
+    switch([snapshot[@"gestureReadiness"] unsignedIntegerValue]) {
+        case BTGestureReadinessPen:return UPMenuPen;
+        case BTGestureReadinessReady:return UPMenuTouch;
+        case BTGestureReadinessUnknown:case BTGestureReadinessLiftRequired:return UPMenuUnavailable;
+    }
+    return UPMenuUnavailable;
+}
 UPEnableAction UPSetupAction(BOOL running, BOOL listenGranted, BOOL postGranted) {
     if(running)return UPDisable;
     if(!listenGranted)return UPRequestInputMonitoring;
@@ -22,9 +34,8 @@ NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL pos
     BOOL touchActive=running && [snapshot[@"validFrames"] unsignedIntegerValue]>0;
     NSString *penText=!running?@"Off":penActive?@"Active":@"Waiting for reports";
     NSString *touchText=!running?@"Off":touchActive?@"Active":@"Waiting for reports";
-    BOOL suppressed=running && ([pen[@"presence"] isEqual:@"inRange"] ||
-        [snapshot[@"gestureMode"] unsignedIntegerValue]==BTGestureBlocked ||
-        [snapshot[@"status"] hasPrefix:@"Pen left — touch resumes"]);
+    NSUInteger readiness=[snapshot[@"gestureReadiness"] unsignedIntegerValue];
+    BOOL suppressed=running && (readiness==BTGestureReadinessPen || readiness==BTGestureReadinessLiftRequired);
     if(touchActive && suppressed)touchText=@"Active — palm suppression";
     return @{@"pen":penText,@"touch":touchText,@"listen":listenGranted?@"Granted":@"Not granted",
              @"post":postGranted?@"Granted":@"Not granted",

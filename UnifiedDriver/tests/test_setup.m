@@ -45,11 +45,27 @@ int main(void) { @autoreleasepool {
     s=UPSetupStatus(state,YES,YES);
     assert([s[@"pen"] isEqual:@"Waiting for reports"] && [s[@"touch"] isEqual:@"Waiting for reports"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@1,@"pressureState":@"tipUp",@"presence":@"inRange"};
-    state[@"validFrames"]=@1;s=UPSetupStatus(state,YES,YES);
+    state[@"gestureReadiness"]=@(BTGestureReadinessPen);state[@"validFrames"]=@1;s=UPSetupStatus(state,YES,YES);
     assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active — palm suppression"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@0,@"pressureState":@"noData"};
     s=UPSetupStatus(state,YES,YES);assert([s[@"pen"] isEqual:@"Waiting for reports"]);
     state[@"running"]=@NO;s=UPSetupStatus(state,YES,YES);
     assert([s[@"pen"] isEqual:@"Off"] && [s[@"touch"] isEqual:@"Off"]);
+    state[@"running"]=@YES;state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange"};
+    state[@"gestureReadiness"]=@(BTGestureReadinessReady);
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
+    state[@"validFrames"]=@0;state[@"activeContacts"]=@999;
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
+    state[@"gestureReadiness"]=@(BTGestureReadinessPen);
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuPen);
+    state[@"gestureReadiness"]=@(BTGestureReadinessLiftRequired);
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
+    state[@"gestureReadiness"]=@(BTGestureReadinessReady);
+    assert(UPSetupMenuState(state,NO,YES,NO)==UPMenuUnavailable);
+    assert(UPSetupMenuState(state,YES,NO,NO)==UPMenuUnavailable);
+    assert(UPSetupMenuState(state,YES,YES,YES)==UPMenuUnavailable);
+    state[@"penObserver"]=@{@"running":@YES,@"presence":@"unknown"};
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
+    state[@"running"]=@NO;assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
     puts("Setup status and one-per-click permission routing checks passed (offline).");
 }return 0;}

@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+BT_VERSION=$(python3 UnifiedDriver/version.py ${BT_VERSION+--override "$BT_VERSION"})
+BT_BUILD_VERSION=$(python3 UnifiedDriver/version.py --build)
+export BT_VERSION BT_BUILD_VERSION
 export TMPDIR="$PWD/build/unified/scratch"
 APP=build/unified/BostoTablet.app
 OUT=build/unified/verified-package
@@ -13,19 +16,22 @@ codesign --verify --deep --strict "$OUT/Payload/BostoTablet.app"
 "$OUT/Payload/BostoTablet.app/Contents/MacOS/BostoTablet" --self-check
 python3 - <<'PY'
 from pathlib import Path
-import plistlib, hashlib, xml.etree.ElementTree as ET
+import plistlib, hashlib, os, xml.etree.ElementTree as ET
 root=Path('build/unified')
 a=root/'BostoTablet.app'
 b=root/'verified-package/Payload/BostoTablet.app'
 info=plistlib.loads((a/'Contents/Info.plist').read_bytes())
 assert info['CFBundleIdentifier']=='local.BostoTablet'
-assert info['CFBundleShortVersionString']=='0.1.4'
-assert info['CFBundleVersion']=='9'
+assert info['CFBundleShortVersionString']==os.environ['BT_VERSION']
+assert info['CFBundleVersion']==os.environ['BT_BUILD_VERSION']
 assert info['LSFileQuarantineEnabled'] is True
 assert info['CFBundleExecutable']=='BostoTablet'
+assert info['CFBundleIconFile']=='BostoTablet.icns'
+assert set(p.name for p in (a/'Contents/Resources').iterdir())=={'BostoTablet.icns'}
+assert (a/'Contents/Resources/BostoTablet.icns').read_bytes()[:4]==b'icns'
 assert not info.get('LSBackgroundOnly',False)
 pkg=ET.parse(root/'verified-package/PackageInfo').getroot()
-assert pkg.attrib['version']=='0.1.4'
+assert pkg.attrib['version']==os.environ['BT_VERSION']
 assert pkg.attrib['install-location']=='/Applications'
 assert pkg.attrib['relocatable']=='false'
 assert pkg.attrib['postinstall-action']=='none'
@@ -34,7 +40,7 @@ assert pkg.find('bundle').attrib['path']=='./BostoTablet.app'
 assert set(p.name for p in (root/'verified-package/Payload').iterdir())=={'BostoTablet.app'}
 files=lambda p: sorted(str(f.relative_to(p)) for f in p.rglob('*') if f.is_file())
 assert files(a)==files(b)
-assert set(files(a))=={'Contents/Info.plist','Contents/MacOS/BostoTablet','Contents/_CodeSignature/CodeResources'}
+assert set(files(a))=={'Contents/Resources/BostoTablet.icns','Contents/Info.plist','Contents/MacOS/BostoTablet','Contents/_CodeSignature/CodeResources'}
 for name in files(a): assert (a/name).read_bytes()==(b/name).read_bytes(),name
 assert not (root/'verified-package/Scripts').exists()
 for p in [a/'Contents/MacOS/BostoTablet',root/'BostoTablet.pkg']:
