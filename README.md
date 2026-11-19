@@ -112,7 +112,8 @@ python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
 ## Permissions and validation limits
 
 The package targets `/Applications/BostoTablet.app`. For manual use, launch the
-app, select the display, and press **Enable**. macOS Input Monitoring and
+app, check the detected/preselected display, and press **Enable**. Launching
+(including Open at Login) never starts pen/touch or requests permissions. macOS Input Monitoring and
 Accessibility permissions are needed for device access and event posting;
 grant them to BostoTablet in System Settings when requested, then retry Enable.
 Unsigned/unnotarized distribution remains subject to macOS Gatekeeper checks.
