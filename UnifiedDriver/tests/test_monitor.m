@@ -103,15 +103,38 @@ int main(void){@autoreleasepool{
     assert(BTGestureTick(&gestures,13.5,&touchBatch));assert(touchBatch.count>0 && touchBatch.events[0].kind==BTGesturePointerDown);
     [m stop];drainMain();
     // Silence expires only a posted held tip, measured from the last valid report 1.
+    [BTPenMonitor updateShortcutBindings:@[@{@"key":@6,@"modifiers":@(kCGEventFlagMaskCommand)},NSNull.null]];
     m.presenceChanged=nil;fakeUptime=1000;assert([m startWithError:NULL]);deliver(0x10);
     fakeUptime=1010;[m tick:nil];drainMain();assert(m.running); // Mere hover must not expire.
     deliver(0x11);fakeUptime=1011;deliver(0x11); // A valid stationary tip report refreshes.
     fakeUptime=1012.9;uint8_t unrelated[]={2,0};callback(callbackContext,0,NULL,kIOHIDReportTypeInput,2,unrelated,2);
     fakeUptime=1012.999;[m tick:nil];drainMain();assert(m.running);
-    int oldUps=ups,oldExits=exits,oldCloses=closes;fakeUptime=1013;[m tick:nil];drainMain();
-    assert(!m.running && ups==oldUps+1 && exits==oldExits+1 && closes==oldCloses+1);
+    int oldUps=ups,oldExits=exits,oldCloses=closes,oldOpens=opens;
+    IOHIDReportCallback heldCallback=callback;void *heldContext=callbackContext;
+    __block int failures=0;
+    id timeoutObserver=[NSNotificationCenter.defaultCenter addObserverForName:UPFailureNotification object:m queue:nil usingBlock:^(NSNotification *note){(void)note;failures++;}];
+    fakeUptime=1013;[m tick:nil];drainMain();
+    fprintf(stderr,"pen silence: running=%d ups=%d exits=%d closes=%d failures=%d\n",m.running,ups-oldUps,exits-oldExits,closes-oldCloses,failures);
+    assert(m.running && ups==oldUps+1 && exits==oldExits && closes==oldCloses && failures==0);
+    assert(callback==heldCallback && callbackContext==heldContext && opens==oldOpens);
+    assert(m.presence==BTPenInRange && ![m.snapshot[@"tipDown"] boolValue]);
+    assert([m.snapshot[@"effectivePressure"] doubleValue]==0 && [m.snapshot[@"rawPressure"] intValue]==0);
     assert([m.snapshot[@"heldTipTimeouts"] unsignedIntValue]==1);
-    [m tick:nil];drainMain();[m stop];drainMain();assert(ups==oldUps+1 && exits==oldExits+1 && closes==oldCloses+1);
+    int quietPosts=posts,quietKeys=keyDowns;
+    for(int i=0;i<3;i++){fakeUptime+=10;[m tick:nil];deliver(0x17);}
+    assert(posts==quietPosts && keyDowns==quietKeys && ups==oldUps+1 && exits==oldExits);
+    assert([m.snapshot[@"heldTipTimeouts"] unsignedIntValue]==1);
+    deliver(0x10);deliver(0x11);assert([m.snapshot[@"tipDown"] boolValue] && opens==oldOpens);
+    fakeUptime+=2;[m tick:nil];assert(ups==oldUps+2 && exits==oldExits && m.presence==BTPenInRange);
+    quietPosts=posts;deliver(0x19);assert(posts==quietPosts); // Tool change while held cannot rearm.
+    deliver(0);assert(m.presence==BTPenOutOfRange && exits==oldExits+1);
+    quietPosts=posts;fakeUptime+=100;[m tick:nil];
+    assert(m.running && posts==quietPosts && m.presence==BTPenOutOfRange);
+    deliver(0x11);assert([m.snapshot[@"tipDown"] boolValue] && m.running && opens==oldOpens);
+    [NSNotificationCenter.defaultCenter removeObserver:timeoutObserver];
+    [BTPenMonitor updateShortcutBindings:nil];
+    [m stop];drainMain();assert(ups==oldUps+3 && exits==oldExits+2 && closes==oldCloses+1);
+    puts("Pen silence recovers once without close, proximity exit, shortcuts or held-tip replay; real up/out rearms.");
     // Real main queue: callback teardown must be deferred, with output blocked now.
     assert([m startWithError:NULL]);deliver(0x11);oldCloses=closes;oldUps=ups;oldExits=exits;int oldPosts=posts;
     __block bool ownerStopped=false;

@@ -59,8 +59,3 @@ NSDictionary *UPLaunchDisplay(NSArray<NSDictionary *> *displays, NSString *saved
         @"Off: no unique nonmirrored Bosto Tablet display. Connect it or choose a display and Enable manually.";
     return nil;
 }
-BOOL UPConsumeLaunchAttempt(BOOL *attempted) {
-    if(*attempted)return NO;
-    *attempted=YES;
-    return YES;
-}

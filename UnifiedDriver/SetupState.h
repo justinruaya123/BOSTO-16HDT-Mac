@@ -14,4 +14,3 @@ NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL pos
 
 // Never falls back when a saved UUID is missing, duplicated, or mirrored.
 NSDictionary *UPLaunchDisplay(NSArray<NSDictionary *> *displays, NSString *savedUUID, NSString **reason);
-BOOL UPConsumeLaunchAttempt(BOOL *attempted);

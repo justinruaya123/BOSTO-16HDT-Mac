@@ -46,7 +46,7 @@ static BOOL exact(IOHIDDeviceRef d) {
     NSUInteger _presses[2],_shortcuts,_shortcutFailures;
     UPPacket _acceptedPacket;
     double _effectivePressure;
-    BOOL _hasPacket;
+    BOOL _hasPacket,_awaitingTipRelease;
     CGRect _bounds;
     NSUInteger _reports,_ignored,_heldTipTimeouts;
     double _lastValidReportAt,_lastHeldTipTimeoutGap;
@@ -101,7 +101,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     [self stop];
     if(_stopping){if(error)*error=[NSError errorWithDomain:@"local.BostoTablet" code:3 userInfo:@{NSLocalizedDescriptionKey:@"Previous pen session is stopping; retry after cleanup."}];return NO;}
     _reports=_ignored=_heldTipTimeouts=0;
-    _buttons=(UPButtonState){0};_hasPacket=NO;
+    _buttons=(UPButtonState){0};_hasPacket=NO;_awaitingTipRelease=NO;
     _presses[0]=_presses[1]=_shortcuts=_shortcutFailures=0;_lastValidReportAt=_lastHeldTipTimeoutGap=0;
     if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted || !CGPreflightPostEventAccess())return [self fail:@"Input Monitoring and Accessibility required; grant access then Enable again." error:error];
     if(!selectedDisplay || !CGDisplayIsActive(selectedDisplay) || !isfinite(pressureExponent) || pressureExponent<0.25 || pressureExponent>4)return [self fail:@"Select an active display and a pressure exponent from 0.25 to 4." error:error];
@@ -142,6 +142,14 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     self.status=packet.inRange?@"Pen in range — touch suppressed.":@"Pen exited — touch resume delay active.";
     [self publish:packet.inRange?BTPenInRange:BTPenOutOfRange];
     if(!self.running)return;
+    _lastValidReportAt=NSProcessInfo.processInfo.systemUptime;
+    BOOL recovering=_awaitingTipRelease;
+    if(recovering && packet.inRange && packet.tip) {
+        // Observe button levels without edges; a held tip cannot become a new stroke.
+        (void)UPButtonPresses(&_buttons,packet,true);
+        return;
+    }
+    _awaitingTipRelease=NO; // Only a real tip-up or out-of-range report rearms.
     UPBatch batch={0};
     double exponent=pressureExponent;
     if(!UPAdvance(&_state,packet,_bounds,exponent,&batch)){[self abort:@"Could not construct native pen events; disabled."];return;}
@@ -149,7 +157,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     // Keep the tester tied to this submitted packet and its curve, not later edits.
     _acceptedPacket=packet;_effectivePressure=UPPressure(packet,exponent);_hasPacket=YES;
     // Capture observes held/released state without emitting; edits preserve it.
-    uint8_t presses=UPButtonPresses(&_buttons,packet,shortcutCapture);
+    uint8_t presses=UPButtonPresses(&_buttons,packet,shortcutCapture || recovering);
     for(NSUInteger i=0;i<2;i++)if(presses & (1<<i)) {
         _presses[i]++;
         id binding=shortcutBindings.count==2?shortcutBindings[i]:NSNull.null;
@@ -159,7 +167,6 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
             [self post:&keys];_shortcuts++;
         }else _shortcutFailures++;
     }
-    _lastValidReportAt=NSProcessInfo.processInfo.systemUptime;
 }
 - (void)tick:(NSTimer *)timer {
     (void)timer;if(!self.running)return;
@@ -170,9 +177,17 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     double gap=NSProcessInfo.processInfo.systemUptime-_lastValidReportAt;
     if(_state.down && gap>=2.0) {
         _heldTipTimeouts++;_lastHeldTipTimeoutGap=gap;
-        NSString *message=[NSString stringWithFormat:@"Held-tip report timeout (%.3f s without valid report 1); both streams disabled. Stationary-tip threshold needs physical validation.",gap];
-        NSLog(@"BostoTablet: %@",message);
-        [self abort:message];
+        // Release the synthetic tip without inventing a proximity exit. Keep the
+        // confirmed presence for palm rejection and the exact HID session open.
+        UPPacket released=_state.last;released.tip=false;released.pressure=0;
+        UPBatch batch={0};
+        if(!UPAdvance(&_state,released,_bounds,pressureExponent,&batch)){
+            [self abort:@"Could not construct native pen events; disabled."];return;
+        }
+        [self post:&batch];
+        _acceptedPacket=released;_effectivePressure=0;_awaitingTipRelease=YES;
+        self.status=@"Pen tip released after report silence — waiting for real tip up or exit; touch suppressed.";
+        NSLog(@"BostoTablet: held-tip report gap %.3f s; tip released, session remains enabled.",gap);
     }
 }
 - (void)removed:(IOHIDDeviceRef)d {if(self.running && d==_device)[self abort:@"Pen disconnected; disabled. Reconnect and Enable again."];}

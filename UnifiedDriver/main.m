@@ -13,7 +13,7 @@
 #import "BatteryNotifications.h"
 #import "MenuIcon.h"
 static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField labelWithString:text];v.frame=r;return v;}
-@interface UPApp : NSObject<NSApplicationDelegate,NSWindowDelegate,NSTabViewDelegate> { BOOL _launchAttempted; }
+@interface UPApp : NSObject<NSApplicationDelegate,NSWindowDelegate,NSTabViewDelegate>
 @property(nonatomic,strong) BTTouchController *touch;
 @property(nonatomic,strong) NSWindow *window;
 @property(nonatomic,strong) NSStatusItem *item;
@@ -70,7 +70,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(reloadDisplays:) name:NSApplicationDidChangeScreenParametersNotification object:nil];
     [self reloadDisplays:nil];[self.window center];[self show:nil];
     self.timer=[NSTimer timerWithTimeInterval:0.25 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];[NSRunLoop.currentRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];[self refresh:nil];
-    dispatch_async(dispatch_get_main_queue(),^{[self attemptLaunchStart];});
+    [self preselectLaunchDisplay];
 }
 - (void)composeControlsInView:(NSView *)root resumeDelay:(double)resumeDelay {
     NSTabView *tabs=[[NSTabView alloc]initWithFrame:NSMakeRect(10,10,680,530)];tabs.delegate=self;[root addSubview:tabs];
@@ -175,8 +175,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSURL *url=[NSURL URLWithString:[@"x-apple.systempreferences:com.apple.preference.security?" stringByAppendingString:pane]];
     if(![workspace openURL:url])[workspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security"]];
 }
-- (void)attemptLaunchStart {
-    if(!UPConsumeLaunchAttempt(&_launchAttempted))return;
+- (void)preselectLaunchDisplay {
     NSString *reason=nil;
     id saved=[self.preferences objectForKey:@"selectedDisplayUUID"];
     NSString *uuid=[saved isKindOfClass:NSString.class]?saved:nil;
@@ -186,14 +185,14 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
         if([item.representedObject isEqual:display]){[self.displays selectItem:item];break;}
     }
     self.explicitDisplaySelection=NO;
-    [self startSelectedDisplay:NO];
+    [self refresh:nil];
 }
 - (void)toggle:(id)sender {
     (void)sender;
     if(self.touch.running){[self disable:nil];return;}
-    [self startSelectedDisplay:YES];
+    [self startSelectedDisplay];
 }
-- (void)startSelectedDisplay:(BOOL)manual {
+- (void)startSelectedDisplay {
     if(self.checkingPermission || self.touch.running)return;
     UPEnableAction action=UPSetupAction(NO,IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)==kIOHIDAccessTypeGranted,CGPreflightPostEventAccess());
     self.failure=nil;
@@ -227,7 +226,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSError *error=nil;
     if(![self.touch startWithDisplay:[display[@"id"] unsignedIntValue] postEvents:YES error:&error])
         self.failure=[NSString stringWithFormat:@"Off: %@ Reconnect the selected display and exact Bosto USB pen/touch, then Enable manually.",error.localizedDescription?:@"Device start failed."];
-    else if(manual && self.explicitDisplaySelection && [display[@"uuid"] length]>0)
+    else if(self.explicitDisplaySelection && [display[@"uuid"] length]>0)
         [self.preferences setObject:display[@"uuid"] forKey:@"selectedDisplayUUID"];
     [self refresh:nil];
 }

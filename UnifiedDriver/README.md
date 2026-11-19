@@ -1,11 +1,13 @@
 # BostoTablet unified driver
 
 An Apple Silicon-only arm64 app (`local.BostoTablet`) and one component package targeting
-`/Applications/BostoTablet.app`. Launch attempts pen and touch once for the saved
-display or a unique nonmirrored Bosto Tablet display, if permissions are already
-granted. Otherwise, choose the display and press Enable. Quitting, disabling, display
+`/Applications/BostoTablet.app`. Launch only detects and preselects the saved
+display or a unique nonmirrored Bosto Tablet display. It never starts pen/touch
+or requests permissions. Press Enable to request missing permissions or start
+the session; after granting access, press Enable again. Quitting, disabling, display
 changes, sleep/session changes, permission loss, or device failures release the
-owned streams. Optional Open at Login uses macOS 13+ SMAppService. No launch
+owned streams. Optional Open at Login uses macOS 13+ SMAppService and opens the app only;
+pen and touch still require Enable. No launch
 agent, install scripts, pen writes, Wacom
 settings, mouse settings, or vendor executables are included.
 
@@ -34,8 +36,9 @@ settings, mouse settings, or vendor executables are included.
   until the user presses Enable. Permission grants are never reset or migrated.
 - `Info.plist`, `components.plist`: app identity and nonrelocatable package metadata.
 - `tests/test_controller.m`: existing offline hardware fixture checks the unified
-  observe entry has zero device opens/writes/posts, and monitor failure closes
-  both streams without an app delegate.
+  observe entry has zero device opens/writes/posts, touch silence cancels
+  pending/drag/scroll/pinch input without closing, and genuine monitor failure
+  closes both streams without an app delegate.
 - `tests/test_pen.m`: offline parser and native CGEvent/AppKit checks. No posting.
 - `tests/test_monitor.m`: fake HID/permission/posting checks for exact selection,
   failure cleanup, shared presence, and the real gesture core's two-second exit
@@ -75,14 +78,26 @@ Standalone Multitouch observation remains available in its separate build.
 `UnifiedMonitor` uses monotonic `systemUptime` for a separate held-tip watchdog.
 Only a posted tip-down arms it. At the first timer check with a gap of at least
 2 seconds since the last successfully parsed and posted report 1, it logs the
-gap, releases tip/proximity once and disables both streams. Unrelated report IDs
-do not refresh this clock; invalid report 1 already fails closed without refresh.
-Callback silence during hover does not expire proximity. Snapshot fields
+gap and posts one tip-up, without a proximity exit, shortcut, session stop or
+HID reopen. Held-tip reports remain suppressed until a real tip-up or out-of-range
+report rearms the next stroke. Confirmed in-range presence continues to suppress
+touch until the pen actually exits. Unrelated report IDs do not refresh this clock;
+invalid report 1 still fails closed. Callback silence during hover or confirmed
+out-of-range inactivity does not expire proximity or disable either stream. Snapshot fields
 `heldTipReportTimeout`, `heldTipTimeouts`, `lastHeldTipTimeoutGap`, and
 `lastValidReportUptime` expose this behavior for hardware validation and survive
 stop (reset on the next start). This watchdog does not alter the distinct palm
 cooldown. **The stationary-tip report gap and 2-second watchdog threshold have
 not been physically validated.**
+
+In BostoTablet, the touch controller also cancels a pending or active gesture
+after 0.5 seconds without a valid frame on its selected report stream. Cancellation
+is one-shot until a real no-contact frame on that stream; held contacts cannot
+produce phantom taps, drags, scrolls or pinches. Both sessions and their HID handles
+remain open. Once contacts lift, fresh input works without Enable. Readiness stays
+ready during ordinary inactivity when the pen is confirmed out and no contacts
+are blocked. The separate standalone Multitouch build retains its previous timeout
+behavior through `BT_UNIFIED_DRIVER`.
 
 The pen protocol is restricted to exact `0ED1:7821 / 0D:02`, report 1.
 Legacy `0ED1:782C` is unsupported: its bit packing and device behavior differ.
@@ -124,7 +139,8 @@ Offline checks do not establish hardware or GUI behavior. Physically validate:
    side buttons and inversion, clean tip down/drag/up with pressure in drawing
    applications, and pressure curve behavior. Check stationary held-tip report
    gaps against the watchdog threshold, the logged timeout and one-time release,
-   and confirm silent hover remains in proximity. Native event construction and
+   confirm silent hover remains in proximity, and verify up/out then a fresh stroke
+   works without Enable. Native event construction and
    AppKit conversion checks do not establish actual application acceptance.
 2. Pen suppression of active touch/scroll/pinch, two seconds **after** exit,
    adjustable delays, lift-to-resume, and preserved one-/two-finger behavior.

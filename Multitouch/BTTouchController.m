@@ -47,7 +47,7 @@ NSArray<NSDictionary *> *BTAvailableDisplays(void) {
     CFRunLoopRef _ownerLoop;
     BOOL _openAttempted;
 #ifdef BT_UNIFIED_DRIVER
-    BOOL _unifiedStopping,_unifiedCleaning;
+    BOOL _unifiedStopping,_unifiedCleaning,_touchReportExpired;
 #endif
     NSMutableSet<NSValue *> *_initialDevices;
     BTGestureState _gestures;
@@ -170,6 +170,9 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     _scrollEvents=_magnifyEvents=_cancelEvents=0;_heldEvent=(BTGestureEvent){0};
     BTGestureConfig config=BTGestureDefaultConfig();config.resumeDelay=self.resumeDelay;
     (void)BTGestureInit(&_gestures,config);
+#ifdef BT_UNIFIED_DRIVER
+    _touchReportExpired=NO;
+#endif
     _activeReportID=0;_report4Seen=NO;_rawReportIDs=[NSMutableDictionary dictionary];
     memset(_firmware,0,sizeof _firmware);_configurationWrites=0;_touchConfigurationAccepted=NO;
     _postEvents=postEvents; _lastFrameAt=now(); _lastDownAt=-INFINITY;_clickCount=1;
@@ -340,7 +343,12 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     BTGestureBatch batch={0};
     BOOL valid=BTGestureHandleTouch(&_gestures,(BTGestureTouchInput){frame,_bounds,time},&batch);
     if(![self dispatchBatch:batch valid:valid])return;
-    if(!frame.count)_activeReportID=0;
+    if(!frame.count){
+        _activeReportID=0;
+#ifdef BT_UNIFIED_DRIVER
+        _touchReportExpired=NO;
+#endif
+    }
     [self updateStatus];
 }
 - (void)tick:(NSTimer *)timer {
@@ -356,9 +364,19 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     double time=now();
     // Check freshness before arming a pending one-finger press.
     if(_contacts && time-_lastFrameAt>=0.5) {
+#ifdef BT_UNIFIED_DRIVER
+        if(!_touchReportExpired) {
+            _touchReportExpired=YES;
+            [self cancelGesture];
+            if(_heldEvent.phase!=BTGesturePhaseNone){[self stop];self.status=@"Could not cancel silent touch stream; disabled.";return;}
+        }
+        // Retain the active report stream and blocked contacts until its real
+        // no-contact frame. Silence must neither rearm a gesture nor close HID.
+#else
         [self stop];
         self.status=@"Touch report timeout; disabled. Press Enable to retry.";
         return;
+#endif
     }
     BTGestureBatch batch={0};BOOL valid=BTGestureTick(&_gestures,time,&batch);
     if([self dispatchBatch:batch valid:valid])[self updateStatus];

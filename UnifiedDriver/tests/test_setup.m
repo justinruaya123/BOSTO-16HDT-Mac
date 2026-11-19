@@ -19,10 +19,6 @@ int main(void) { @autoreleasepool {
     assert(!UPLaunchDisplay(@[bosto,bosto],@"tablet",&reason));
     assert(!UPLaunchDisplay(@[mirror,bosto],@"tablet",&reason));
     assert(!UPLaunchDisplay(@[mirror,other],@"tablet",&reason));
-    BOOL attempted=NO;
-    assert(UPConsumeLaunchAttempt(&attempted));
-    // Missing display/permission/device, Disable, refresh and activation cannot rearm launch.
-    assert(!UPConsumeLaunchAttempt(&attempted));
     // Missing grants precede display validation, with Input Monitoring first.
     assert(UPSetupAction(NO,NO,NO)==UPRequestInputMonitoring);
     assert(UPSetupAction(NO,YES,NO)==UPRequestAccessibility);
@@ -54,6 +50,10 @@ int main(void) { @autoreleasepool {
     state[@"running"]=@YES;state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange"};
     state[@"gestureReadiness"]=@(BTGestureReadinessReady);
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
+    state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange",@"reports":@1,@"pressureState":@"outOfRange"};
+    s=UPSetupStatus(state,YES,YES);
+    assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active"]);
+    // Readiness, not recent contact/report activity, determines the ready menu.
     state[@"validFrames"]=@0;state[@"activeContacts"]=@999;
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
     state[@"gestureReadiness"]=@(BTGestureReadinessPen);
