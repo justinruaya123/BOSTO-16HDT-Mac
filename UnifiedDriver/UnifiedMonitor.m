@@ -8,22 +8,11 @@ NSString *const UPFailureNotification=@"UnifiedPenFailed";
 static CGDirectDisplayID selectedDisplay;
 static double pressureExponent=1;
 static NSArray *shortcutBindings;
-static BOOL shortcutCapture;
 NSArray *UPValidatedBindings(id value) {
     NSMutableArray *result=[NSMutableArray array];
     for(NSUInteger i=0;i<2;i++) {
         id binding=[value isKindOfClass:NSArray.class] && [value count]==2?value[i]:nil;
-        id key=[binding isKindOfClass:NSDictionary.class]?binding[@"key"]:nil;
-        id mods=[binding isKindOfClass:NSDictionary.class]?binding[@"modifiers"]:nil;
-        BOOL valid=[key isKindOfClass:NSNumber.class] && [mods isKindOfClass:NSNumber.class] &&
-            isfinite([key doubleValue]) && [key doubleValue]==[key unsignedShortValue] &&
-            isfinite([mods doubleValue]) && [mods doubleValue]==[mods unsignedLongLongValue] &&
-            UPShortcutValid([key unsignedShortValue],[mods unsignedLongLongValue]);
-        if(valid) {
-            NSString *name=binding[@"name"];
-            if(![name isKindOfClass:NSString.class] || name.length>32 || [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location!=NSNotFound)name=@"";
-            [result addObject:@{@"key":key,@"modifiers":mods,@"name":name}];
-        } else [result addObject:NSNull.null];
+        [result addObject:UPValidatedShortcut(binding)?:NSNull.null];
     }
     return result;
 }
@@ -75,7 +64,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
 + (void)configureDisplay:(CGDirectDisplayID)display pressureExponent:(double)exponent {selectedDisplay=display;[self updatePressureExponent:exponent];}
 + (void)updatePressureExponent:(double)exponent {pressureExponent=UPValidatedExponent(@(exponent));}
 + (void)updateShortcutBindings:(NSArray *)bindings {shortcutBindings=UPValidatedBindings(bindings);}
-+ (void)setShortcutCapture:(BOOL)capturing {shortcutCapture=capturing;}
++ (void)setShortcutCapture:(BOOL)capturing {UPSetShortcutCapture(capturing);}
 - (instancetype)init {if((self=[super init])){_presence=BTPenUnknown;_status=@"Disabled";}return self;}
 - (void)dealloc {[self cleanup];}
 - (void)publish:(BTPenPresence)p {self.presence=p;if(self.presenceChanged)self.presenceChanged(p);}
@@ -126,7 +115,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     IOHIDDeviceRegisterRemovalCallback(_device,deviceGone,(__bridge void *)self);
     IOHIDDeviceRegisterInputReportCallback(_device,_buffer,sizeof _buffer,input,(__bridge void *)self);
     IOHIDDeviceScheduleWithRunLoop(_device,_loop,kCFRunLoopCommonModes);
-    self.running=YES;self.status=@"Pen state unknown — touch suppressed until report 1 arrives.";
+    self.running=YES;self.status=@"Waiting for the first pen report.";
     [self publish:BTPenUnknown];
     self.timer=[NSTimer timerWithTimeInterval:0.05 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.currentRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];return YES;
@@ -157,7 +146,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     // Keep the tester tied to this submitted packet and its curve, not later edits.
     _acceptedPacket=packet;_effectivePressure=UPPressure(packet,exponent);_hasPacket=YES;
     // Capture observes held/released state without emitting; edits preserve it.
-    uint8_t presses=UPButtonPresses(&_buttons,packet,shortcutCapture || recovering);
+    uint8_t presses=UPButtonPresses(&_buttons,packet,UPShortcutCaptureActive() || recovering);
     for(NSUInteger i=0;i<2;i++)if(presses & (1<<i)) {
         _presses[i]++;
         id binding=shortcutBindings.count==2?shortcutBindings[i]:NSNull.null;
@@ -228,6 +217,6 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
         @"pressureState":!self.running?@"inactive":!_hasPacket?@"noData":!_acceptedPacket.inRange?@"outOfRange":_acceptedPacket.tip?@"tipDown":@"tipUp",
         @"rawPressure":@(self.running && _hasPacket && _acceptedPacket.inRange && _acceptedPacket.tip?_acceptedPacket.pressure:0),
         @"effectivePressure":@(self.running && _hasPacket?_effectivePressure:0),
-        @"sideButtonPresses":@[@(_presses[0]),@(_presses[1])],@"shortcutPairs":@(_shortcuts),@"shortcutFailures":@(_shortcutFailures),@"shortcutCapture":@(shortcutCapture),@"heldTipReportTimeout":@2.0,@"heldTipTimeouts":@(_heldTipTimeouts),@"lastHeldTipTimeoutGap":@(_lastHeldTipTimeoutGap),@"lastValidReportUptime":@(_lastValidReportAt)};
+        @"sideButtonPresses":@[@(_presses[0]),@(_presses[1])],@"shortcutPairs":@(_shortcuts),@"shortcutFailures":@(_shortcutFailures),@"shortcutCapture":@(UPShortcutCaptureActive()),@"heldTipReportTimeout":@2.0,@"heldTipTimeouts":@(_heldTipTimeouts),@"lastHeldTipTimeoutGap":@(_lastHeldTipTimeoutGap),@"lastValidReportUptime":@(_lastValidReportAt)};
 }
 @end

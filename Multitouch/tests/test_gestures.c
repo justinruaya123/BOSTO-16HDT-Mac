@@ -12,7 +12,51 @@ static BTGestureState ready(void){BTGestureState s;BTGestureBatch b;CHECK(BTGest
 static BTGestureBatch touch(BTGestureState *s,BTTouchFrame f,double t){BTGestureBatch b;CHECK(BTGestureHandleTouch(s,(BTGestureTouchInput){f,bounds,t},&b));CHECK(b.count<=BT_GESTURE_BATCH_CAPACITY);return b;}
 static BTGestureBatch pen(BTGestureState *s,BTPenPresence p,double t){BTGestureBatch b;CHECK(BTGestureHandlePen(s,(BTGesturePenInput){p,t},&b));return b;}
 static void noDown(BTGestureBatch b){for(size_t i=0;i<b.count;i++)CHECK(b.events[i].kind!=BTGesturePointerDown);}
+static void checkPairRecontact(void){
+    // Lift from pending, scrolling, or magnifying. Only new pair motion counts.
+    for(int prior=0;prior<3;prior++){
+        BTGestureState s=ready(); BTGestureBatch b;
+        (void)touch(&s,two(4000,8000),0);
+        if(prior)(void)touch(&s,prior==1?two(4500,8500):two(3500,8500),0.02);
+        b=touch(&s,one(4500,4000),0.04);
+        CHECK(b.count==(prior?1u:0u));
+        if(prior)CHECK(b.events[0].phase==BTGesturePhaseEnded);
+        CHECK(touch(&s,one(5000,4000),0.10).count==0);
+        CHECK(BTGestureTick(&s,0.20,&b) && b.count==0);
+        BTTouchFrame pair=two(5000,11000);
+        pair.contacts[1].identifier=12;  // A returning finger can receive a new ID.
+        CHECK(touch(&s,pair,0.22).count==0);
+        CHECK(touch(&s,pair,0.24).count==0);
+        pair.contacts[0].x=prior==2?4700:5300; pair.contacts[1].x=11300;
+        b=touch(&s,pair,0.26);
+        CHECK(b.count==3);
+        if(b.count==3){
+            BTGestureKind kind=prior==2?BTGestureMagnify:BTGestureScroll;
+            CHECK(b.events[0].kind==BTGesturePointerMove);
+            CHECK(b.events[1].kind==kind && b.events[1].phase==BTGesturePhaseBegan);
+            CHECK(b.events[2].kind==kind && b.events[2].phase==BTGesturePhaseChanged);
+            if(prior==2){NEAR(b.events[2].magnification,0.1);}
+            else {NEAR(b.events[2].deltaX,300.0/16384*1919);}
+        }
+    }
+}
+static void checkLostSurvivorStaysBlocked(void){
+    for(int loss=0;loss<4;loss++){
+        BTGestureState s=ready(); BTGestureBatch b;
+        BTTouchFrame single=one(4000,4000), pair=two(4000,8000);
+        (void)touch(&s,pair,0);
+        if(loss==0)single.contacts[0].identifier=11; // Not from the original pair.
+        (void)touch(&s,single,0.02);
+        if(loss==1){single.contacts[0].identifier=11;(void)touch(&s,single,0.04);}
+        if(loss==2)pair.contacts[0].identifier=11; // Neither ID is the survivor.
+        if(loss==3)BTGestureCancelForReportGap(&s,1,&b);
+        CHECK(touch(&s,pair,1.02).count==0);
+        pair.contacts[0].x+=500;pair.contacts[1].x+=500;
+        CHECK(touch(&s,pair,1.04).count==0);
+    }
+}
 int main(void){
+    checkPairRecontact();checkLostSurvivorStaysBlocked();
     BTGestureState probe;CHECK(BTGestureInit(&probe,BTGestureDefaultConfig()));
     CHECK(BTGestureGetReadiness(&probe,0)==BTGestureReadinessUnknown);
     (void)pen(&probe,BTPenInRange,1);
@@ -46,6 +90,18 @@ int main(void){
     b=touch(&s,one(5200,4000),0.10);CHECK(b.count==0);(void)touch(&s,(BTTouchFrame){0},0.12);
     (void)touch(&s,one(5000,4000),0.14);b=touch(&s,(BTTouchFrame){0},0.16);CHECK(b.count==2);
 
+    // A thumb can stay planted. Moving only the other finger changes span
+    // and center together; do not latch scroll before pinch slop is crossed.
+    for(int sign=-1;sign<=1;sign+=2){
+        s=ready();(void)touch(&s,two(4000,8000),0);
+        b=touch(&s,two(4000,8000+80*sign),0.01);CHECK(b.count==0);
+        b=touch(&s,two(4000,8000+320*sign),0.02);
+        CHECK(b.count==3 && b.events[2].kind==BTGestureMagnify);
+        NEAR(b.events[2].magnification,0.08*sign);
+    }
+    // Unequal but parallel movement with little change of span remains scroll.
+    s=ready();(void)touch(&s,two(4000,8000),0);b=touch(&s,two(4250,8320),0.02);
+    CHECK(b.count==3 && b.events[2].kind==BTGestureScroll);
     // Center fixed, span x1.5 => native incremental magnification +0.5.
     s=ready();(void)touch(&s,two(4000,8000),0);b=touch(&s,two(3000,9000),0.02);
     CHECK(b.count==3);noDown(b);CHECK(b.events[1].kind==BTGestureMagnify);CHECK(b.events[1].phase==BTGesturePhaseBegan);CHECK(b.events[2].phase==BTGesturePhaseChanged);NEAR(b.events[2].magnification,0.5);CHECK(s.mode==BTGestureMagnifying);

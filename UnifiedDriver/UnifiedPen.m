@@ -90,3 +90,21 @@ bool UPShortcutEvents(uint16_t key,CGEventFlags modifiers,UPBatch *batch) {
     CGEventSetFlags(down,modifiers);CGEventSetFlags(up,0);
     batch->events[0]=down;batch->events[1]=up;batch->count=2;return true;
 }
+
+NSDictionary *UPValidatedShortcut(id value) {
+    if(![value isKindOfClass:NSDictionary.class])return nil;
+    id key=value[@"key"],mods=value[@"modifiers"];
+    if(![key isKindOfClass:NSNumber.class] || ![mods isKindOfClass:NSNumber.class] ||
+        CFGetTypeID((__bridge CFTypeRef)key)==CFBooleanGetTypeID() ||
+        CFGetTypeID((__bridge CFTypeRef)mods)==CFBooleanGetTypeID() ||
+        !isfinite([key doubleValue]) || [key doubleValue]!=[key unsignedShortValue] ||
+        !isfinite([mods doubleValue]) || [mods doubleValue]!=[mods unsignedLongLongValue] ||
+        !UPShortcutValid([key unsignedShortValue],[mods unsignedLongLongValue]))return nil;
+    NSString *name=value[@"name"];
+    if(![name isKindOfClass:NSString.class] || name.length>32 || [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location!=NSNotFound)name=@"";
+    return @{@"key":key,@"modifiers":mods,@"name":[name copy]};
+}
+
+static bool shortcutCapture;
+void UPSetShortcutCapture(bool capturing) { shortcutCapture=capturing; }
+bool UPShortcutCaptureActive(void) { return shortcutCapture; }

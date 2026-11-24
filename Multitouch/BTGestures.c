@@ -4,7 +4,7 @@
 #include <string.h>
 
 BTGestureConfig BTGestureDefaultConfig(void) {
-    return (BTGestureConfig){2,0.06,3,4,0.04,12,0.5};
+    return (BTGestureConfig){2,0.06,3,4,0.04,12,0.5,false};
 }
 static bool validDelay(double n) { return isfinite(n) && n>=0 && n<=30; }
 static bool validConfig(BTGestureConfig c) {
@@ -35,10 +35,11 @@ static bool finish(BTGestureState *s,BTGestureBatch *b,BTGesturePhase phase) {
         case BTGestureDragging: result=push(b,pointer(BTGesturePointerUp,phase,s->x,s->y));break;
         case BTGestureScrolling: result=push(b,(BTGestureEvent){.kind=BTGestureScroll,.phase=phase,.x=s->anchorX,.y=s->anchorY});break;
         case BTGestureMagnifying: result=push(b,(BTGestureEvent){.kind=BTGestureMagnify,.phase=phase,.x=s->anchorX,.y=s->anchorY});break;
-        case BTGestureIdle: case BTGestureOnePending: case BTGestureTwoPending: case BTGestureBlocked: break;
+        case BTGestureIdle: case BTGestureOnePending: case BTGestureTwoPending:
+        case BTGestureBlocked: case BTGestureAwaitingPartner: break;
         default: result=false;break;
     }
-    s->mode=BTGestureIdle;return result;
+    s->mode=BTGestureIdle;s->rearmPairAfterGap=false;return result;
 }
 void BTGestureCancel(BTGestureState *s,BTGestureBatch *b) {
     if(!b)return;
@@ -52,15 +53,27 @@ static bool clockStep(BTGestureState *s,double time,BTGestureBatch *b) {
     }
     s->clockValid=true;s->lastTime=time;return true;
 }
+static bool waitingForPen(const BTGestureState *s) {
+    // Allow initial silence only, not a loss of previously known presence.
+    return s->pen==BTPenUnknown && (!s->config.allowTouchBeforePenReport || s->penWasDetected);
+}
 static bool suppressed(const BTGestureState *s,double time) {
-    return s->pen!=BTPenOutOfRange || (s->penOutSeen && time-s->penOutAt<s->config.resumeDelay);
+    return waitingForPen(s) || s->pen==BTPenInRange ||
+        (s->penOutSeen && time-s->penOutAt<s->config.resumeDelay);
 }
 BTGestureReadiness BTGestureGetReadiness(const BTGestureState *s,double time) {
-    if(!s || !s->clockValid || !isfinite(time) || time<s->lastTime || s->pen==BTPenUnknown)
+    if(!s || !s->clockValid || !isfinite(time) || time<s->lastTime || waitingForPen(s))
         return BTGestureReadinessUnknown;
     if(suppressed(s,time))return BTGestureReadinessPen;
     if(s->mode==BTGestureBlocked)return BTGestureReadinessLiftRequired;
     return BTGestureReadinessReady;
+}
+void BTGestureCancelForReportGap(BTGestureState *s,double time,BTGestureBatch *b) {
+    if(!s || !b)return;
+    // A partial lift only proves continuity while the survivor is observed.
+    bool rearm=s->lastCount && s->mode!=BTGestureAwaitingPartner && BTGestureGetReadiness(s,time)==BTGestureReadinessReady;
+    BTGestureCancel(s,b);
+    s->rearmPairAfterGap=rearm;
 }
 static bool suppressOutput(BTGestureState *s,BTGestureBatch *b) {
     bool result=finish(s,b,BTGesturePhaseCancelled);
@@ -115,7 +128,14 @@ static bool oneFinger(BTGestureState *s,BTGestureTouchInput input,BTGestureBatch
     BTContact contact=input.frame.contacts[0];double x,y;
     if(!BTMapTouchPoint(contact,input.bounds,&x,&y))return false;
     if(s->mode==BTGestureScrolling || s->mode==BTGestureMagnifying || s->mode==BTGestureTwoPending) {
-        bool result=finish(s,b,BTGesturePhaseEnded);s->mode=BTGestureBlocked;return result;
+        bool survivor=contact.identifier==s->identifiers[0] || contact.identifier==s->identifiers[1];
+        bool result=finish(s,b,BTGesturePhaseEnded);
+        s->mode=survivor?BTGestureAwaitingPartner:BTGestureBlocked;
+        s->identifiers[0]=contact.identifier;return result;
+    }
+    if(s->mode==BTGestureAwaitingPartner){
+        if(contact.identifier!=s->identifiers[0])s->mode=BTGestureBlocked;
+        return true; // A leftover finger is never a tap or a drag.
     }
     if(s->mode==BTGestureBlocked)return true;
     if(s->mode==BTGestureIdle) {
@@ -140,6 +160,9 @@ static bool twoFingers(BTGestureState *s,BTGestureTouchInput input,BTGestureBatc
     double ax,ay,bx,by;
     if(!BTMapTouchPoint(a,input.bounds,&ax,&ay) || !BTMapTouchPoint(c,input.bounds,&bx,&by))return false;
     double cx=(ax+bx)/2,cy=(ay+by)/2,span=hypot(bx-ax,by-ay);
+    if(s->mode==BTGestureAwaitingPartner){
+        s->mode=(a.identifier==s->identifiers[0] || c.identifier==s->identifiers[0])?BTGestureIdle:BTGestureBlocked;
+    }
     if(s->mode==BTGestureBlocked)return true;
     if(s->mode==BTGestureIdle || s->mode==BTGestureOnePending || s->mode==BTGestureDragging) {
         if(!finish(s,b,BTGesturePhaseCancelled))return false;
@@ -155,10 +178,14 @@ static bool twoFingers(BTGestureState *s,BTGestureTouchInput input,BTGestureBatc
             if(span>=s->config.minSpan){s->anchorX=s->lastCx=cx;s->anchorY=s->lastCy=cy;s->startSpan=s->lastSpan=span;}
             return true;
         }
-        double scrollScore=hypot(cx-s->anchorX,cy-s->anchorY)/s->config.scrollSlop;
+        double travel=hypot(cx-s->anchorX,cy-s->anchorY);
+        double scrollScore=travel/s->config.scrollSlop;
         double pinchScore=span>=s->config.minSpan?fabs(span/s->startSpan-1)/s->config.pinchSlop:0;
-        if(scrollScore<1 && pinchScore<1)return true;
-        s->mode=pinchScore>scrollScore?BTGestureMagnifying:BTGestureScrolling;
+        // A pinch around one planted finger moves the center by half the
+        // span change. Compare distances before applying the unequal slops.
+        bool radial=span>=s->config.minSpan && fabs(span-s->startSpan)>1.5*travel;
+        if(radial ? pinchScore<1 : (scrollScore<1 && pinchScore<1))return true;
+        s->mode=(radial || pinchScore>scrollScore)?BTGestureMagnifying:BTGestureScrolling;
         BTGestureKind kind=s->mode==BTGestureMagnifying?BTGestureMagnify:BTGestureScroll;
         // Scroll/gesture routing must not stay under an unrelated desktop cursor.
         if(!push(b,pointer(BTGesturePointerMove,BTGesturePhaseNone,s->anchorX,s->anchorY)) ||
@@ -195,6 +222,10 @@ bool BTGestureHandleTouch(BTGestureState *s,BTGestureTouchInput input,BTGestureB
     }
     if(input.frame.count>2) {
         bool result=finish(s,b,BTGesturePhaseCancelled);s->mode=BTGestureBlocked;return result;
+    }
+    if(input.frame.count==2 && s->rearmPairAfterGap){
+        // No pointer press and no old delta: the real pair only sets a baseline.
+        s->mode=BTGestureIdle;s->rearmPairAfterGap=false;
     }
     return input.frame.count==1?oneFinger(s,input,b):twoFingers(s,input,b);
 }

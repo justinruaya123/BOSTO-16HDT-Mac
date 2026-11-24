@@ -22,7 +22,8 @@ class VersionTests(unittest.TestCase):
             with self.subTest(source=value), self.assertRaises(ValueError):
                 build_version(value)
 
-    def test_next_checks_ancestry_but_allows_tagged_reruns(self):
+    @patch('version.Path.read_bytes', return_value=b'<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>0.1.4</string></dict></plist>')
+    def test_next_checks_ancestry_but_allows_tagged_reruns(self, _fixture_plist):
         for status in [0, 1, 128]:
             with self.subTest(status=status), patch('sys.argv', ['version.py', '--next', 'target']), patch(
                 'version.subprocess.check_output', side_effect=['target', 'v0.1.4', 'highest']

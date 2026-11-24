@@ -90,8 +90,13 @@ IOReturn ReviewSetReport(IOHIDDeviceRef d,IOHIDReportType type,CFIndex rid,const
 }
 IOHIDManagerRef ReviewManagerCreate(CFAllocatorRef allocator, IOOptionBits options) { (void)allocator;(void)options;return (IOHIDManagerRef)CFDictionaryCreateMutable(NULL,0,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks); }
 void ReviewSetMatching(IOHIDManagerRef manager, CFArrayRef matches) {
-    (void)manager;NSArray *rows=(__bridge NSArray *)matches;
+    NSArray *rows=(__bridge NSArray *)matches;
+    ((__bridge NSMutableDictionary *)manager)[@"matches"]=rows;
+#ifdef BT_UNIFIED_DRIVER
+    if(rows.count!=1)boundaryViolations++;
+#else
     if(rows.count!=2)boundaryViolations++;
+#endif
     for(NSDictionary *row in rows)if(![row[@kIOHIDVendorIDKey] isEqual:@0x6066] || ![row[@kIOHIDProductIDKey] isEqual:@1] ||
         !(([row[@kIOHIDPrimaryUsagePageKey] isEqual:@13] && [row[@kIOHIDPrimaryUsageKey] isEqual:@4]) ||
           ([row[@kIOHIDPrimaryUsagePageKey] isEqual:@1] && [row[@kIOHIDPrimaryUsageKey] isEqual:@2])))boundaryViolations++;
@@ -105,7 +110,17 @@ void ReviewPenMatching(IOHIDManagerRef manager,CFDictionaryRef match) {
 void ReviewValueMatching(IOHIDManagerRef manager,CFDictionaryRef match) {(void)manager;(void)match;}
 CFSetRef ReviewCopyDevices(IOHIDManagerRef manager) {
     if(penManager(manager))return (__bridge_retained CFSetRef)[NSSet setWithObject:fakePen];
+#ifndef BT_UNIFIED_DRIVER
     return CFSetCreateCopy(NULL,fakeDevices);
+#else
+    NSArray *rows=((__bridge NSDictionary *)manager)[@"matches"];
+    NSMutableSet *selected=[NSMutableSet set];
+    for(NSDictionary *device in (__bridge NSSet *)fakeDevices)for(NSDictionary *row in rows){
+        BOOL match=YES;for(id key in row)if(![row[key] isEqual:device[key]]){match=NO;break;}
+        if(match)[selected addObject:device];
+    }
+    return (__bridge_retained CFSetRef)[selected copy];
+#endif
 }
 void ReviewRegisterReports(IOHIDManagerRef manager,IOHIDReportCallback callback,void *context) { (void)manager;reportCallback=callback;reportContext=context; }
 void ReviewRegisterValues(IOHIDManagerRef manager,IOHIDValueCallback callback,void *context) {(void)manager;valueCallback=callback;valueContext=context;}

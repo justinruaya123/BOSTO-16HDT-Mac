@@ -5,7 +5,7 @@
 
 typedef enum { BTPenUnknown, BTPenOutOfRange, BTPenInRange } BTPenPresence;
 typedef enum { BTGestureIdle, BTGestureOnePending, BTGestureDragging, BTGestureTwoPending,
-               BTGestureScrolling, BTGestureMagnifying, BTGestureBlocked } BTGestureMode;
+               BTGestureScrolling, BTGestureMagnifying, BTGestureBlocked, BTGestureAwaitingPartner } BTGestureMode;
 typedef enum { BTGesturePointerMove, BTGesturePointerDown, BTGesturePointerDrag, BTGesturePointerUp,
                BTGestureScroll, BTGestureMagnify } BTGestureKind;
 typedef enum { BTGesturePhaseNone, BTGesturePhaseBegan, BTGesturePhaseChanged,
@@ -17,13 +17,14 @@ typedef struct {
 typedef struct { size_t count; BTGestureEvent events[BT_GESTURE_BATCH_CAPACITY]; } BTGestureBatch;
 typedef struct {
     double resumeDelay,armingDelay,pointerSlop,scrollSlop,pinchSlop,minSpan,maxMagnification;
+    bool allowTouchBeforePenReport;
 } BTGestureConfig;
 typedef struct { BTTouchFrame frame; BTDisplayBounds bounds; double time; } BTGestureTouchInput;
 typedef struct { BTPenPresence presence; double time; } BTGesturePenInput;
 typedef struct { double seconds,time; } BTGestureDelayInput;
 typedef struct {
     BTGestureConfig config; BTGestureMode mode; BTPenPresence pen;
-    bool clockValid,penOutSeen,penWasDetected;
+    bool clockValid,penOutSeen,penWasDetected,rearmPairAfterGap;
     double lastTime,penOutAt,startedAt;
     size_t lastCount; uint8_t identifiers[2];
     double x,y,startX,startY,lastCx,lastCy,lastSpan,startSpan,anchorX,anchorY;
@@ -40,4 +41,6 @@ bool BTGestureHandlePen(BTGestureState *state,BTGesturePenInput input,BTGestureB
 bool BTGestureSetResumeDelay(BTGestureState *state,BTGestureDelayInput input,BTGestureBatch *batch);
 bool BTGestureTick(BTGestureState *state,double time,BTGestureBatch *batch);
 void BTGestureCancel(BTGestureState *state,BTGestureBatch *batch);
+/* End stalled output. A subsequent real pair may establish a new baseline. */
+void BTGestureCancelForReportGap(BTGestureState *state,double time,BTGestureBatch *batch);
 #endif
