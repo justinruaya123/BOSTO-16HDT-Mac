@@ -5,6 +5,8 @@ extern NSString *const UPFailureNotification;
 // The touch controller creates this
 // replacement monitor; its presence callback is the sole palm-rejection source.
 @interface BTPenMonitor (UnifiedSettings)
+// Main-run-loop setting. Muting suppresses output, never releases the exact USB pen.
+@property(nonatomic) BOOL penInputEnabled;
 + (void)configureDisplay:(CGDirectDisplayID)display pressureExponent:(double)exponent;
 + (void)updatePressureExponent:(double)exponent;
 + (void)updateShortcutBindings:(NSArray *)bindings;

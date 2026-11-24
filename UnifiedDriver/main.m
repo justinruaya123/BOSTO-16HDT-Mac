@@ -14,6 +14,8 @@
 #import "MenuIcon.h"
 static NSString *const UPAutoDetectKey=@"autoDetectTablet";
 static NSString *const UPFlipTouchYKey=@"flipTouchY";
+static NSString *const UPTouchInputKey=@"touchInputEnabled";
+static NSString *const UPPenInputKey=@"penInputEnabled";
 static NSString *const UPInputDisabledKey=@"inputDisabled";
 static NSString *const UPGestureActionsKey=@"gestureActions";
 static NSString *gestureKey(NSUInteger row) { return row==0?@"swipe":@"pinch"; }
@@ -37,7 +39,8 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
 @property(nonatomic,strong) NSUserDefaults *preferences;
 @property(nonatomic) double exponent;
 @property(nonatomic,strong) NSTextView *diagnostics;
-@property(nonatomic,strong) NSButton *enable;
+@property(nonatomic,strong) NSButton *enable,*touchInput,*penInput;
+@property(nonatomic) BOOL changingInputs;
 @property(nonatomic,strong) NSArray<NSTextField *> *setupDots,*setupLabels;
 @property(nonatomic) BOOL checkingPermission;
 @property(nonatomic,strong) NSButton *autoDetectTablet;
@@ -72,7 +75,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     }];
     NSMenu *menu=[NSMenu new];
     self.batteryMenu=[menu addItemWithTitle:UPBatteryDescription(nil) action:nil keyEquivalent:@""];NSMenuItem *show=[menu addItemWithTitle:@"Show BostoTablet" action:@selector(show:) keyEquivalent:@""];show.target=self;
-    NSMenuItem *stop=[menu addItemWithTitle:@"Disable pen and touch" action:@selector(disable:) keyEquivalent:@""];stop.target=self;
+    NSMenuItem *stop=[menu addItemWithTitle:@"Stop driver (release tablet)" action:@selector(disable:) keyEquivalent:@""];stop.target=self;
     self.updater=[UPUpdateController new];
     NSMenuItem *updates=[menu addItemWithTitle:@"Check for Updates…" action:@selector(checkForUpdates:) keyEquivalent:@""];updates.target=self.updater;
     [menu addItemWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];self.item.menu=menu;
@@ -110,21 +113,28 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.touchOrientation.target=self;self.touchOrientation.action=@selector(changeTouchOrientation:);[v addSubview:self.touchOrientation];
     [v addSubview:label(@"Touch delay after pen exit (0–30 s)",NSMakeRect(20,352,300,24))];
     self.delay=[[NSTextField alloc]initWithFrame:NSMakeRect(340,352,90,24)];self.delay.doubleValue=resumeDelay;[v addSubview:self.delay];
-    self.enable=[NSButton buttonWithTitle:@"Enable pen and touch" target:self action:@selector(toggle:)];self.enable.frame=NSMakeRect(20,278,225,32);[v addSubview:self.enable];
+    self.enable=[NSButton buttonWithTitle:@"Start driver" target:self action:@selector(toggle:)];self.enable.frame=NSMakeRect(20,278,225,32);[v addSubview:self.enable];
     NSButton *quit=[NSButton buttonWithTitle:@"Quit" target:NSApp action:@selector(terminate:)];quit.frame=NSMakeRect(550,278,90,32);[v addSubview:quit];
     self.status=label(@"",NSMakeRect(250,255,290,65));self.status.maximumNumberOfLines=4;self.status.lineBreakMode=NSLineBreakByWordWrapping;self.status.font=[NSFont systemFontOfSize:11];[v addSubview:self.status];
-    NSBox *box=[[NSBox alloc]initWithFrame:NSMakeRect(20,80,620,165)];box.title=@"Current session and app permissions";[v addSubview:box];
+    NSBox *box=[[NSBox alloc]initWithFrame:NSMakeRect(20,80,620,165)];box.title=@"Requested inputs and current session";[v addSubview:box];
     NSMutableArray *dots=[NSMutableArray array],*rows=[NSMutableArray array];
-    NSArray *titles=@[@"Pen",@"Touch",@"Input Monitoring",@"Accessibility"];
+    NSArray *titles=@[@"Pen input",@"Touch input",@"Input Monitoring",@"Accessibility"];
     for(NSUInteger i=0;i<titles.count;i++){
         CGFloat y=112-i*30;
         NSTextField *dot=label(@"●",NSMakeRect(12,y,18,22));dot.font=[NSFont systemFontOfSize:14];
         NSTextField *row=label(@"",NSMakeRect(190,y,395,22));
-        [box.contentView addSubview:dot];[box.contentView addSubview:label(titles[i],NSMakeRect(38,y,150,22))];[box.contentView addSubview:row];
+        [box.contentView addSubview:dot];[box.contentView addSubview:row];
+        if(i<2){
+            NSButton *input=[NSButton checkboxWithTitle:titles[i] target:self action:@selector(changeInput:)];
+            input.frame=NSMakeRect(38,y,145,22);
+            input.state=[self requestsInputForKey:i==0?UPPenInputKey:UPTouchInputKey]?NSControlStateValueOn:NSControlStateValueOff;
+            if(i==0)self.penInput=input;else self.touchInput=input;
+            [box.contentView addSubview:input];
+        }else [box.contentView addSubview:label(titles[i],NSMakeRect(38,y,150,22))];
         [dots addObject:dot];[rows addObject:row];
     }
     self.setupDots=dots;self.setupLabels=rows;
-    NSTextField *scope=label(@"Permissions apply to BostoTablet as a whole. Active means accepted reports in this session.\nReport activity does not verify delivery to apps or gesture handling.",NSMakeRect(20,25,620,55));scope.maximumNumberOfLines=3;scope.font=[NSFont systemFontOfSize:11];[v addSubview:scope];
+    NSTextField *scope=label(@"These switches save your Bosto display preferences. While running, both off mutes this tablet. Stop releases it to macOS.\nActive means reports received, not verified delivery to apps.",NSMakeRect(20,25,620,55));scope.maximumNumberOfLines=3;scope.font=[NSFont systemFontOfSize:11];[v addSubview:scope];
     NSTabViewItem *diagnostics=[[NSTabViewItem alloc]initWithIdentifier:@"diagnostics"];diagnostics.label=@"Diagnostics";
     NSView *dv=[[NSView alloc]initWithFrame:v.frame];diagnostics.view=dv;
     NSScrollView *scroll=[[NSScrollView alloc]initWithFrame:NSMakeRect(20,20,620,440)];scroll.hasVerticalScroller=YES;
@@ -288,6 +298,26 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     }
     [self refresh:nil];
 }
+- (BOOL)requestsInputForKey:(NSString *)key {
+    return ![[self.preferences objectForKey:key] isEqual:@NO];
+}
+- (void)changeInput:(NSButton *)sender {
+    NSString *key=sender==self.touchInput?UPTouchInputKey:UPPenInputKey;
+    BOOL enabled=sender.state==NSControlStateValueOn;
+    if(enabled==[self requestsInputForKey:key])return;
+    [self.preferences setBool:enabled forKey:key];
+    if(!self.changingInputs && ![[self.preferences objectForKey:UPInputDisabledKey] isEqual:@YES]){
+        self.changingInputs=YES;self.lastInputAttempt=nil;
+        // A fault may already have queued cleanup. Never apply settings before those releases.
+        if(self.touch.running)[self.touch stop];
+        dispatch_async(dispatch_get_main_queue(),^{
+            self.changingInputs=NO;
+            [self reconcileInput]; // Recheck Stop, connection and grants; read the latest pair.
+            [self refresh:nil];
+        });
+    }
+    [self refresh:nil];
+}
 - (void)restoreTouchOrientation {
     self.touch.flipTouchY=[[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES];
 }
@@ -324,7 +354,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     }
     [self.displays selectItemAtIndex:0];
     self.failure=automatic?@"No unique nonmirrored Bosto Tablet detected. Connect it or turn off Auto-detect to choose a display.":
-        reason?:@"Choose a nonmirrored display, then press Enable.";
+        reason?:@"Choose a nonmirrored display, then press Start driver.";
     return NO;
 }
 - (void)preselectLaunchDisplay {
@@ -342,11 +372,14 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
 }
 - (NSArray *)inputCandidateForDisplay:(NSDictionary *)display {
     if(!display || [display[@"mirrored"] boolValue])return nil;
+    // Screen notifications may still be queued when a switch finishes cleaning up.
+    NSDictionary *current=UPLaunchDisplay(BTAvailableDisplays(),self.autoDetectTabletEnabled?nil:display[@"uuid"],NULL);
+    if(![current isEqual:display])return nil;
     NSArray<NSNumber *> *devices=BTTabletRegistryIdentity();
     return devices?@[display,devices]:nil;
 }
 - (void)reconcileInput {
-    if(self.inputTerminating || self.inputSleeping || self.inputSessionInactive || self.checkingPermission || self.touch.running ||
+    if(self.changingInputs || self.inputTerminating || self.inputSleeping || self.inputSessionInactive || self.checkingPermission || self.touch.running ||
         [[self.preferences objectForKey:UPInputDisabledKey] isEqual:@YES])return;
     if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted || !CGPreflightPostEventAccess()){
         self.lastInputAttempt=nil;return;
@@ -355,7 +388,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSArray *candidate=[self inputCandidateForDisplay:display];
     if(!candidate){
         self.lastInputAttempt=nil;
-        if(display)self.failure=@"Waiting for the Bosto tablet’s USB touch and pen interfaces…";
+        if(display)self.failure=@"Waiting for the selected display and the Bosto tablet’s USB interfaces…";
         return;
     }
     if([self.lastInputAttempt isEqual:candidate])return;
@@ -364,12 +397,12 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
 }
 - (void)toggle:(id)sender {
     (void)sender;
-    if(self.touch.running){[self disable:nil];return;}
+    if(self.touch.running || self.changingInputs){[self disable:nil];return;}
     [self.preferences setBool:NO forKey:UPInputDisabledKey];
     [self startSelectedDisplayAllowingPermissionRequests:YES];
 }
 - (void)startSelectedDisplayAllowingPermissionRequests:(BOOL)allowRequests {
-    if(self.checkingPermission || self.touch.running)return;
+    if(self.changingInputs || self.checkingPermission || self.touch.running)return;
     UPEnableAction action=UPSetupAction(NO,IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)==kIOHIDAccessTypeGranted,CGPreflightPostEventAccess());
     self.failure=nil;
     if(action==UPRequestInputMonitoring || action==UPRequestAccessibility){
@@ -400,10 +433,12 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSScanner *ds=[NSScanner scannerWithString:self.delay.stringValue];double delay=0;
     if(!display || [display[@"mirrored"] boolValue] || ![ds scanDouble:&delay] || !ds.isAtEnd || !isfinite(delay) || delay<0 || delay>30){self.failure=@"Choose a display; delay must be 0–30.";[self refresh:nil];return;}
     if(allowRequests)self.lastInputAttempt=[self inputCandidateForDisplay:display];
+    self.touch.touchInputEnabled=[self requestsInputForKey:UPTouchInputKey];
+    self.touch.penInputEnabled=[self requestsInputForKey:UPPenInputKey];
     [self.touch updateResumeDelay:delay];[BTPenMonitor configureDisplay:[display[@"id"] unsignedIntValue] pressureExponent:self.exponent];
     NSError *error=nil;
     if(![self.touch startWithDisplay:[display[@"id"] unsignedIntValue] postEvents:YES error:&error])
-        self.failure=[NSString stringWithFormat:@"Off: %@ Reconnect the selected display and Bosto USB pen/touch, or press Enable to retry.",error.localizedDescription?:@"Device start failed."];
+        self.failure=[NSString stringWithFormat:@"Off: %@ Reconnect the selected display and Bosto USB pen/touch, or press Start driver to retry.",error.localizedDescription?:@"Device start failed."];
     [self refresh:nil];
 }
 - (void)refreshLoginStatus {
@@ -451,22 +486,31 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.displays.enabled=!running && !automatic;
     self.pressureDescription.stringValue=[NSString stringWithFormat:@"Curve exponent %.2f%@",self.exponent,self.exponent==1?@" — linear (default)":@""];
     NSMutableDictionary *state=[self.touch.snapshot mutableCopy];
+    state[@"touchInputEnabled"]=@(self.touch.touchInputEnabled);
+    state[@"penInputEnabled"]=@(self.touch.penInputEnabled);
     state[@"penSeized"]=state[@"penObserver"][@"seized"]?:@NO;
     if(!running)self.gestureStatus.stringValue=@"Input is not running. Check Home / Setup.";
     else self.gestureStatus.stringValue=[NSString stringWithFormat:@"This session: %@ reports with 2+ contacts · peak %@ fingers\nMultitouch report callbacks: %@ · native scroll events: %@ · native zoom events: %@",
         state[@"multiContactFrames"],state[@"peakContacts"],state[@"rawReportIDs"][@"4"]?:@0,state[@"scrollEvents"],state[@"magnifyEvents"]];
     BOOL listen=IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)==kIOHIDAccessTypeGranted;
     BOOL post=CGPreflightPostEventAccess();
-    self.enable.title=running?@"Disable pen and touch":!listen?@"Request Input Monitoring…":!post?@"Request Accessibility…":@"Enable pen and touch";
+    self.enable.title=running || self.changingInputs?@"Stop driver (release tablet)":!listen?@"Request Input Monitoring…":!post?@"Request Accessibility…":@"Start driver";
     self.enable.enabled=!self.checkingPermission;
     UPMenuState menuState=UPSetupMenuState(state,listen,post,self.failure!=nil);
     NSString *description=menuState==UPMenuPen?@"BostoTablet: pen in range or palm cooldown":menuState==UPMenuTouch?@"BostoTablet: touch gestures ready":@"BostoTablet: unavailable — check setup";
-    self.item.button.image=UPMenuIcon(menuState);
+    BOOL controlling=UPSetupControlsInput(state,listen,post,self.failure!=nil);
+    NSImage *icon=UPMenuIcon(menuState);
+    if(controlling && menuState==UPMenuUnavailable && (!self.touch.touchInputEnabled || !self.touch.penInputEnabled)){
+        // An intentionally muted input is not a setup fault.
+        icon=self.touch.penInputEnabled?UPMenuIcon(UPMenuPen):([NSImage imageWithSystemSymbolName:@"pause.circle" accessibilityDescription:nil]?:icon);
+        description=[NSString stringWithFormat:@"BostoTablet: driver running — touch %@, pen %@",self.touch.touchInputEnabled?@"enabled":@"muted",self.touch.penInputEnabled?@"enabled":@"muted"];
+    }
+    self.item.button.image=icon;
     self.item.button.toolTip=description;[self.item.button setAccessibilityLabel:description];
-    NSNumber *battery=running && listen && post && !self.failure && [state[@"penObserver"][@"running"] boolValue]?UPBatteryPercent(state[@"penObserver"][@"batteryPercent"]):nil;
+    NSNumber *battery=controlling?UPBatteryPercent(state[@"penObserver"][@"batteryPercent"]):nil;
     self.batteryLabel.stringValue=self.batteryMenu.title=UPBatteryDescription(battery);
     [self.batteryNotifications refresh];
-    NSDictionary *setup=UPSetupStatus(state,listen,post);
+    NSDictionary *setup=UPSetupStatus(state,listen,post,self.failure!=nil);
     NSArray *keys=@[@"pen",@"touch",@"listen",@"post"];
     NSDictionary *colors=@{@"off":NSColor.secondaryLabelColor,@"waiting":NSColor.systemOrangeColor,@"active":NSColor.systemGreenColor};
     for(NSUInteger i=0;i<keys.count;i++){
@@ -475,12 +519,15 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
         self.setupDots[i].textColor=colors[tone];
     }
     NSString *guidance;
-    if(!listen || !post)guidance=[NSString stringWithFormat:@"Request %@, then allow BostoTablet in Settings. If already on, quit and relaunch. Enable pen and touch once both are granted.",!listen?@"Input Monitoring":@"Accessibility"];
-    else guidance=running?self.touch.status:@"Choose a display and delay, then Enable pen and touch.";
+    if(!listen || !post)guidance=[NSString stringWithFormat:@"Request %@, then allow BostoTablet in Settings. If already on, quit and relaunch. Start the driver once both are granted.",!listen?@"Input Monitoring":@"Accessibility"];
+    else if(self.changingInputs)guidance=@"Releasing previous inputs before applying your choices…";
+    else if(running && !controlling)guidance=@"Driver unavailable. Saved choices are not confirmed.";
+    else if(controlling && (!self.touch.touchInputEnabled || !self.touch.penInputEnabled))guidance=@"Driver running. See each input’s current state below.";
+    else guidance=running?self.touch.status:@"Driver inactive. Start the driver to apply your saved input choices.";
     self.status.stringValue=self.failure?:guidance;
     NSDictionary *pen=state[@"penObserver"];
     NSString *phase=pen[@"pressureState"]?:@"inactive";
-    NSDictionary *names=@{@"inactive":@"Inactive — enable pen and touch to test",@"noData":@"No data — waiting for an accepted pen packet",@"outOfRange":@"Pen out of range",@"tipUp":@"Tip up",@"tipDown":@"Tip down"};
+    NSDictionary *names=@{@"inactive":@"Inactive — start the driver to test",@"noData":@"No data — waiting for an accepted pen packet",@"outOfRange":@"Pen out of range",@"tipUp":@"Tip up",@"tipDown":@"Tip down"};
     self.rawMeter.doubleValue=[pen[@"rawPressure"] doubleValue]/8192.0;
     self.effectiveMeter.doubleValue=[pen[@"effectivePressure"] doubleValue];
     self.tester.stringValue=[NSString stringWithFormat:@"%@\nRaw %.0f / 8192 · Effective %.1f%%",names[phase]?:phase,[pen[@"rawPressure"] doubleValue],100*[pen[@"effectivePressure"] doubleValue]];

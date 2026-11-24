@@ -116,7 +116,9 @@ on by default and selects a unique nonmirrored **Bosto Tablet**, even if a
 manual display was previously saved. Turn it off to choose a display manually.
 **Touch orientation → Flip vertical** reverses only finger-touch Y; choose
 **Normal** to restore the original mapping. Both settings persist.
-BostoTablet opens only the touchscreen digitizer (`0D:04`) for touch input. It leaves the companion interface (`01:02`) available to macOS for native multitouch.
+**Touch** and **Pen** are independent settings for the BT-16HDT. Both default to on. Leave the driver running to enforce the settings: turning both off mutes the display’s input; stopping the driver releases the hardware to macOS.
+
+With Touch and Pen on, hovering the pen counts as pen input: the tip does not need to touch the glass. During pen use, palm rejection must cover both the display digitizer and the Bosto’s own native multitouch interface (`01:02`). The latter is normally available to macOS for finger gestures. With Touch off, both display touch interfaces stay muted while the driver runs. These controls apply to the Bosto display, not to the Mac’s trackpad or other accessories.
 
 **Gestures** keeps native two-finger scroll/pan and pinch zoom by default.
 Either gesture can run a recorded keyboard shortcut instead or be turned off.
@@ -125,7 +127,7 @@ prove an app received the resulting gesture.
 
 BostoTablet starts pen and touch automatically when the selected display, exact
 USB interfaces, and existing macOS permissions are ready. It also resumes on
-reconnect or wake. **Disable pen and touch** stays off until explicitly enabled.
+reconnect or wake. **Stop driver (release tablet)** keeps the driver stopped until explicitly started again.
 Automatic startup never prompts for permission; use the setup button for missing
 Input Monitoring or Accessibility grants. Open at Login remains optional.
 

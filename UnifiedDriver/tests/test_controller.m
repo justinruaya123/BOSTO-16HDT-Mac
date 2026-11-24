@@ -1,4 +1,16 @@
 // Existing offline hardware fixture, exercising the unified-only controller guard.
+#import <Foundation/Foundation.h>
+// Advance only this fixture's monotonic uptime; no wall-clock sleeps or HID I/O.
+static double uptimeOffset;
+@interface PalmTestClock : NSObject
++ (instancetype)processInfo;
+- (NSTimeInterval)systemUptime;
+@end
+@implementation PalmTestClock
++ (instancetype)processInfo {static PalmTestClock *clock;if(!clock)clock=[self new];return clock;}
+- (NSTimeInterval)systemUptime {return NSProcessInfo.processInfo.systemUptime+uptimeOffset;}
+@end
+#define NSProcessInfo PalmTestClock
 #define BT_UNIFIED_DRIVER 1
 #define BTCreateGestureEvent TestGestureEventFactory
 #import "../../Multitouch/tests/hardware_fakes.h"
@@ -103,14 +115,16 @@ static void checkPassivePairRecovery(BTTouchController *controller) {
         sendFakeTouches(2,4500,8500);
         if(palm) {
             assert(symbolicPosts==0);
-            sendFakeTouches(0,0,0);sendFakeTouches(2,4000,8000);sendFakeTouches(2,4500,8500);
+            sendFakeTouches(0,0,0); // Also clear the original report 3 finger before starting a new pair.
+            uint8_t vendorUp[6]={3};reportCallback(reportContext,0,(__bridge void *)testDigitizer(),kIOHIDReportTypeInput,3,vendorUp,6);
+            sendFakeTouches(2,4000,8000);sendFakeTouches(2,4500,8500);
         }
         assert(postedEvents.lastObject.type==NSEventTypeScrollWheel && postedEvents.lastObject.phase==NSEventPhaseChanged);
         forceReportGap(controller);
         assert(postedEvents.lastObject.phase==NSEventPhaseCancelled);
         sendFakeTouches(2,4000,8000);sendFakeTouches(2,3500,8500);
         assert(postedEvents.lastObject.type==NSEventTypeMagnify && postedEvents.lastObject.phase==NSEventPhaseChanged);
-        assert(postedDowns==0 && postedUps==0 && controller.running && openCalls==1 && penOpenCalls==1);
+        assert(postedDowns==0 && postedUps==0 && controller.running && openCalls==1+palm && penOpenCalls==1);
         [controller stop];drainMain();
     }
     assert([controller updateResumeDelay:2]);
@@ -183,6 +197,136 @@ static void checkBooleanShortcutPreferencesFallBackToNative(BTTouchController *c
     }
     [controller stop];drainMain();chooseActions(controller,@{});
 }
+static void sendVendorContact(BOOL down){
+    uint8_t bytes[]={3,down?0x80:0,0,0x20,0xc0,0x12};
+    reportCallback(reportContext,0,(__bridge void *)testDigitizer(),kIOHIDReportTypeInput,3,bytes,sizeof bytes);
+}
+static void checkPalmCompanion(BTTouchController *controller){
+    resetFakes();initialPen=BTPenUnknown;requirePalmBeforePen=YES;
+    assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+    assert([controller updateResumeDelay:2]);
+    pressFakeFinger();sendVendorContact(YES); // Duplicate stream still reports this palm.
+    assert(![seizedTouches containsObject:testCompanion()] && postedDowns==1);
+    sendFakePen(BTPenInRange);
+    assert([seizedTouches containsObject:testCompanion()] && "Confirmed hover must synchronously seize the paired native companion");
+    assert(postedUps==1 && controller.running && nativePenPosts>0 && !unprotectedPenPosts);
+    sendFakePen(BTPenInRange);uptimeOffset+=300;[[controller valueForKey:@"penMonitor"] tick:nil];[controller tick:nil];
+    assert(openCalls==2 && closeCalls==0 && symbolicPosts==3);
+    sendFakePen(BTPenOutOfRange);uptimeOffset+=3;[controller tick:nil];
+    sendFakeTouches(0,0,0); // Not proof that report 3 lifted.
+    assert(closeCalls==0);sendFakeTouches(2,4000,8000);sendFakeTouches(2,4500,8500);
+    assert(symbolicPosts==3);sendVendorContact(NO);
+    assert(closeCalls==0);sendFakeTouches(0,0,0);
+    assert(closeCalls==1 && ![seizedTouches containsObject:testCompanion()] && controller.running);
+    sendFakePen(BTPenInRange);sendFakePen(BTPenOutOfRange);sendFakeTouches(0,0,0);
+    uptimeOffset+=1;sendFakePen(BTPenInRange);uptimeOffset+=3;[controller tick:nil];
+    assert(openCalls==3 && closeCalls==1);sendFakePen(BTPenOutOfRange);
+    uptimeOffset+=1;sendFakePen(BTPenOutOfRange);[controller tick:nil];assert(closeCalls==1);
+    uptimeOffset+=1.1; // New contact is the first callback past the deadline; do not hand it to macOS mid-contact.
+    sendFakeTouches(1,5000,0);[controller tick:nil];assert(closeCalls==1);
+    assert([controller.snapshot[@"gestureReadiness"] intValue]==BTGestureReadinessLiftRequired);
+    sendFakeTouches(0,0,0);assert(closeCalls==2);
+    sendFakePen(BTPenInRange);sendFakeTouches(0,0,0);
+    uint8_t broken[]={4,0};reportCallback(reportContext,0,(__bridge void *)testDigitizer(),kIOHIDReportTypeInput,4,broken,sizeof broken);
+    sendFakePen(BTPenOutOfRange);uptimeOffset+=5;[controller tick:nil];
+    assert(closeCalls==2 && "A malformed exact report is not a clean boundary");
+    sendVendorContact(NO);assert(closeCalls==2);sendFakeTouches(0,0,0);assert(closeCalls==3);
+    // A verified lift during hover is sufficient when the full delay expires.
+    sendFakePen(BTPenInRange);sendFakeTouches(0,0,0);sendFakePen(BTPenOutOfRange);
+    uptimeOffset+=2.1;[controller tick:nil];assert(closeCalls==4);
+    pressFakeFinger();assert(postedDowns==2 && penOpenCalls==1 && !unprotectedPenPosts);
+    [controller stop];drainMain();assert(seizedTouches.count==0);
+
+    resetFakes();initialPen=BTPenInRange;
+    requirePalmBeforePen=pressDuringStartup=YES;
+    assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+    assert([seizedTouches containsObject:testCompanion()] && nativePenPosts>0 && !unprotectedPenPosts);
+    sendFakePen(BTPenOutOfRange);uptimeOffset+=3;sendVendorContact(NO);
+    assert([seizedTouches containsObject:testCompanion()] && !symbolicPosts && "Carry startup contacts across initial proximity");
+    unplugFakeTouch(testCompanion());drainMain();
+    assert(!controller.running && [controller.status containsString:@"disconnected"] && !seizedTouches.count);
+    for(int startup=0;startup<2;startup++){
+        resetFakes();failTouchOpenService=12;requirePalmBeforePen=YES;initialPen=startup?BTPenInRange:BTPenUnknown;
+        NSError *error=nil;BOOL started=[controller startWithDisplay:42 postEvents:YES error:&error];
+        if(startup)assert(!started && error && !featureWrites);else {assert(started);sendFakePen(BTPenInRange);}
+        assert(!controller.running && ![[controller valueForKey:@"penMonitor"] running]);
+        assert([controller.status localizedCaseInsensitiveContainsString:@"companion"]);
+        drainMain();assert(!seizedTouches.count && closeCalls==1 && !symbolicPosts && !nativePenPosts);
+    }
+    resetFakes();initialPen=BTPenInRange;assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+    failTouchCloseOnce=12;sendFakeTouches(0,0,0);sendFakePen(BTPenOutOfRange);
+    uptimeOffset+=3;[controller tick:nil];assert(!controller.running && [controller.status localizedCaseInsensitiveContainsString:@"release"]);
+    drainMain();assert(!seizedTouches.count);
+    puts("Native palm guard: synchronous exact claim, silent hover, both contact streams, cooldown, reentry, failures and cleanup passed.");
+}
+static void checkInputModes(BTTouchController *controller){
+    assert(controller.touchInputEnabled && controller.penInputEnabled);
+    for(int touch=0;touch<2;touch++)for(int pen=0;pen<2;pen++){
+        resetFakes();controller.touchInputEnabled=touch;controller.penInputEnabled=pen;
+        chooseActions(controller,@{@"swipe":@{@"key":@6,@"modifiers":@0}});
+        assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+        NSSet *expected=touch?[NSSet setWithObject:testDigitizer()]:[NSSet setWithObjects:testDigitizer(),testCompanion(),nil];
+        assert(boundaryViolations==0 && touchOpenAttempts.count==expected.count && [[NSSet setWithArray:touchOpenAttempts] isEqual:expected]);
+        assert([[controller valueForKey:@"penMonitor"] penInputEnabled]==(BOOL)pen && penOpenCalls==1);
+        assert(featureReads==touch && featureWrites==touch && (!touch || writtenDevice==(__bridge IOHIDDeviceRef)testDigitizer()));
+        sendFakePen(BTPenInRange);
+        if(!touch){
+            // There is no live report subscription; drive the same callback anyway
+            // to verify even a queued tap, swipe or pinch cannot escape the mute.
+            assert(!reportCallback);reportCallback=received;reportContext=(__bridge void *)controller;
+        }
+        tapAtY(2000,4);sendFakeTouches(2,4000,8000);sendFakeTouches(2,4500,8500);sendFakeTouches(0,0,0);
+        sendFakeTouches(2,4000,8000);sendFakeTouches(2,3500,8500);sendFakeTouches(0,0,0);
+        [controller tick:nil];assert(controller.running);
+        if(touch && !pen)assert(postedDowns==1 && postedUps==1 && postedEvents[3].type==NSEventTypeKeyUp && postedEvents.lastObject.type==NSEventTypeMagnify);
+        else assert(symbolicPosts==0);
+        assert(pen?(nativePenPosts>0):(nativePenPosts==0));
+        NSSet *held=touch && !pen?[NSSet setWithObject:testDigitizer()]:[NSSet setWithObjects:testDigitizer(),testCompanion(),nil];
+        assert([seizedTouches isEqual:held]);
+        [controller stop];drainMain();assert(!seizedTouches.count && [[NSSet setWithArray:touchClosed] isEqual:held]);
+    }
+    for(int touch=0;touch<2;touch++)for(int pen=0;pen<2;pen++){
+        resetFakes();controller.touchInputEnabled=touch;controller.penInputEnabled=pen;
+        removeDuringSchedule=ReviewGetService((__bridge IOHIDDeviceRef)(touch?testDigitizer():testCompanion()));
+        NSError *error=nil;assert(![controller startWithDisplay:42 postEvents:YES error:&error] && error && !controller.running);
+        drainMain();assert(!seizedTouches.count && !scheduledTouches.count && penOpenCalls==penCloseCalls && !featureWrites);
+    }
+    chooseActions(controller,@{});
+}
+static void checkInvalidTouchSelection(BTTouchController *controller){
+    CFSetRef saved=fakeDevices;
+    for(int both=0;both<2;both++)for(int variant=0;variant<11;variant++){
+        resetFakes();controller.touchInputEnabled=both;
+        NSMutableDictionary *digitizer=[testDigitizer() mutableCopy],*mouse=[testCompanion() mutableCopy];
+        NSMutableSet *inventory=[NSMutableSet set];
+        switch(variant){
+            case 0: break; // missing companion
+            case 1: parents[@22]=@32;usbNodes[@32]=usbNodes[@31];break; // other physical device, even with cloned location
+            case 2: mouse[@kIOHIDLocationIDKey]=@42;break;
+            case 3: [mouse removeObjectForKey:@kIOHIDLocationIDKey];break;
+            case 4: mouse[@kIOHIDTransportKey]=@"Bluetooth";break;
+            case 5: [parents removeObjectForKey:@21];break;
+            case 6: usbNodes[@31]=@{@"idVendor":@1,@"idProduct":@1,@"locationID":@0x12340000};break;
+            case 7: {NSMutableDictionary *extra=[mouse mutableCopy];extra[@"service"]=@13;[inventory addObject:extra];break;}
+            case 8: {NSMutableDictionary *extra=[digitizer mutableCopy];extra[@"service"]=@13;[inventory addObject:extra];controller.touchInputEnabled=YES;break;}
+            case 9: digitizer[@kIOHIDTransportKey]=@"Virtual";controller.touchInputEnabled=YES;break;
+            case 10: usbInterfaces[@22]=@{@"bInterfaceNumber":@5};break; // unrelated mouse function on the composite device
+
+        }
+        [inventory addObject:digitizer];if(variant)[inventory addObject:mouse];
+        fakeDevices=(__bridge_retained CFSetRef)inventory;NSError *error=nil;
+        assert(![controller startWithDisplay:42 postEvents:YES error:&error] && error && !controller.running);
+        drainMain();assert(!openCalls && !penOpenCalls && !featureWrites && !symbolicPosts);
+        CFRelease(fakeDevices);
+    }
+    fakeDevices=saved;resetFakes();controller.touchInputEnabled=NO;failTouchOpenService=12;
+    assert(![controller startWithDisplay:42 postEvents:YES error:NULL]);drainMain();
+    assert(!controller.running && !featureWrites && !symbolicPosts && [touchClosed containsObject:testDigitizer()]);
+    resetFakes();assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+    unplugFakeTouch(testCompanion());
+    drainMain();assert(!controller.running && touchClosed.count==2 && !symbolicPosts);
+    controller.touchInputEnabled=YES;controller.penInputEnabled=YES;
+}
 int main(void) { @autoreleasepool {
     createFakeDevices();resetFakes();
     BTTouchController *controller=[BTTouchController new];NSError *error=nil;
@@ -190,6 +334,8 @@ int main(void) { @autoreleasepool {
     assert([controller.snapshot[@"interfaces"] unsignedIntValue]==1 && "Exclusive open must leave the native gesture companion to macOS");
     assert(boundaryViolations==0 && writtenDevice && property(writtenDevice,kIOHIDPrimaryUsagePageKey)==13);
     [controller stop];drainMain();
+    checkPalmCompanion(controller);checkInputModes(controller);checkInvalidTouchSelection(controller);
+    puts("All four input modes, exact pinned claims, USB pairing rejection and partial-open cleanup passed.");
     checkVerticalOrientation(controller);checkTouchReportRecovery(controller);checkPassivePairRecovery(controller);checkGestureActions(controller);
     checkShortcutDoesNotReplayAcrossGap(controller);checkBooleanShortcutPreferencesFallBackToNative(controller);
     puts("No shortcut replay across a report gap; Boolean preferences retain native output.");resetFakes();
@@ -207,7 +353,7 @@ int main(void) { @autoreleasepool {
     sendFakeTouches(0,0,0);pressFakeFinger();assert(postedDowns==1);
     sendFakePen(BTPenOutOfRange);assert([controller updateResumeDelay:0]);
     pressFakeFinger();assert(postedDowns==1);
-    sendFakeTouches(0,0,0);pressFakeFinger();assert(postedDowns==2 && openCalls==1 && penOpenCalls==1);
+    sendFakeTouches(0,0,0);pressFakeFinger();assert(postedDowns==2 && openCalls==2 && penOpenCalls==1);
     [controller stop];drainMain();assert([controller updateResumeDelay:2]);
     // Existing fake controller exercises pending, dragging, scroll and pinch loss.
     for(int mode=0;mode<4;mode++) {
@@ -253,11 +399,12 @@ int main(void) { @autoreleasepool {
     assert(!controller.running && closeCalls==1 && penCloseCalls==1 && postedUps==1);
     [controller stop];drainMain();
     resetFakes();assert([controller startWithDisplay:42 postEvents:YES error:NULL]);pressFakeFinger();
-    removedCallback(removedContext,0,NULL,(__bridge IOHIDDeviceRef)testDigitizer());
+    unplugFakeTouch(testDigitizer());
     assert(!controller.running && closeCalls==0 && postedUps==0);
     NSString *reason=controller.status;assert(![controller startWithDisplay:42 postEvents:YES error:NULL]);
     int oldPosts=symbolicPosts;pressFakeFinger();assert(symbolicPosts==oldPosts);
     drainMain();assert(closeCalls==1 && postedUps==1 && [controller.status isEqual:reason]);
+    unpluggedDevice=NULL; // Reconnected before explicit restart.
     assert([controller startWithDisplay:42 postEvents:YES error:NULL]);drainMain();assert(controller.running);
     [controller stop];drainMain();CFRelease(fakeDevices);
     puts("Unified observe entry rejected before device opens, writes or posting (fake hardware).");
