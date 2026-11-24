@@ -712,7 +712,8 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 }
 - (void)controllerRemoved:(IOHIDDeviceRef)device {
 #ifdef BT_UNIFIED_DRIVER
-    if(!self.running && !_startingPalmSession)return;
+    // Pinning starts the ownership window, including startup in muted modes.
+    if(!_pinnedTouches || _unifiedStopping)return;
     // Do not re-read properties on an already detached service.
     if([_pinnedTouches indexOfObjectIdenticalTo:(__bridge id)device]==NSNotFound)return;
 #else

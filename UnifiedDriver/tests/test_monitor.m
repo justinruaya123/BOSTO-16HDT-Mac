@@ -9,6 +9,21 @@ static double fakeUptime=100;
 + (instancetype)processInfo {static UPTestProcessInfo *info; if(!info)info=[self new];return info;}
 - (NSTimeInterval)systemUptime {return fakeUptime;}
 @end
+#import <IOKit/IOKitLib.h>
+#include <assert.h>
+// Service 1 is borrowed; successive entries in ancestry are its owned parents.
+static NSArray<NSDictionary *> *ancestry;
+static int parentRefs;
+kern_return_t FakeParent(io_registry_entry_t node,const io_name_t plane,io_registry_entry_t *parent){
+    assert(node && !strcmp(plane,kIOServicePlane));
+    if(node>ancestry.count){*parent=IO_OBJECT_NULL;return KERN_FAILURE;}
+    *parent=node+1;parentRefs++;return KERN_SUCCESS;
+}
+boolean_t FakeConforms(io_object_t node,const io_name_t type){return [ancestry[node-2][@"class"] isEqual:@(type)];}
+CFTypeRef FakeRegistryProperty(io_registry_entry_t node,CFStringRef key,CFAllocatorRef a,IOOptionBits o){
+    (void)a;(void)o;return (__bridge_retained CFTypeRef)ancestry[node-2][(__bridge NSString *)key];
+}
+kern_return_t FakeRelease(io_object_t node){assert(node>1 && parentRefs>0);parentRefs--;return KERN_SUCCESS;}
 #define NSProcessInfo UPTestProcessInfo
 #define IOHIDManagerCreate FakeManager
 #define IOHIDManagerSetDeviceMatching FakeMatch
@@ -18,6 +33,11 @@ static double fakeUptime=100;
 #define IOHIDManagerScheduleWithRunLoop FakeManagerSchedule
 #define IOHIDManagerUnscheduleFromRunLoop FakeManagerUnschedule
 #define IOHIDDeviceGetProperty FakeProperty
+#define IOHIDDeviceGetService FakeService
+#define IORegistryEntryGetParentEntry FakeParent
+#define IOObjectConformsTo FakeConforms
+#define IORegistryEntryCreateCFProperty FakeRegistryProperty
+#define IOObjectRelease FakeRelease
 #define IOHIDDeviceOpen FakeOpen
 #define IOHIDDeviceClose FakeClose
 #define IOHIDDeviceRegisterInputReportCallback FakeReport
@@ -30,7 +50,6 @@ static double fakeUptime=100;
 #define CGDisplayBounds FakeBounds
 #define CGEventPost FakePost
 #import "../UnifiedMonitor.m"
-#include <assert.h>
 static NSArray *devices;
 static NSDictionary *match;
 static IOHIDReportCallback callback;
@@ -56,7 +75,8 @@ void FakeAdded(IOHIDManagerRef m,IOHIDDeviceCallback cb,void *ctx){(void)m;match
 void FakeManagerSchedule(IOHIDManagerRef m,CFRunLoopRef l,CFStringRef mode){(void)m;(void)l;assert(CFEqual(mode,kCFRunLoopCommonModes));}
 void FakeManagerUnschedule(IOHIDManagerRef m,CFRunLoopRef l,CFStringRef mode){(void)m;(void)l;(void)mode;}
 CFTypeRef FakeProperty(IOHIDDeviceRef d,CFStringRef key){return CFDictionaryGetValue((CFDictionaryRef)d,key);}
-IOReturn FakeOpen(IOHIDDeviceRef d,IOOptionBits o){assert(exact(d));assert(o==kIOHIDOptionsTypeSeizeDevice);opens++;return openResult;}
+io_service_t FakeService(IOHIDDeviceRef d){return [((__bridge NSDictionary *)d)[@"service"] unsignedIntValue];}
+IOReturn FakeOpen(IOHIDDeviceRef d,IOOptionBits o){(void)d;assert(o==kIOHIDOptionsTypeSeizeDevice);opens++;return openResult;}
 IOReturn FakeClose(IOHIDDeviceRef d,IOOptionBits o){assert(exact(d));assert(o==kIOHIDOptionsTypeSeizeDevice);if(insideCallback)closesInsideCallback++;closes++;return 0;}
 void FakeReport(IOHIDDeviceRef d,uint8_t *buf,CFIndex n,IOHIDReportCallback cb,void *ctx){(void)d;(void)buf;assert(n==8);callback=cb;callbackContext=ctx;}
 void FakeDeviceRemoval(IOHIDDeviceRef d,IOHIDCallback cb,void *ctx){(void)d;deviceRemoval=cb;deviceRemovalContext=ctx;}
@@ -79,9 +99,23 @@ static void drainMain(void) {
 }
 static void deliver(uint8_t flags){uint8_t b[]={1,flags,0,0x23,0,0x14,0,0x10};assert(callback);callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,b,8);}
 int main(void){@autoreleasepool{
-    NSDictionary *pen=@{@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2,@kIOHIDTransportKey:@"USB",@kIOHIDLocationIDKey:@0x12340000};devices=@[pen];
+    NSDictionary *pen=@{@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2,@kIOHIDTransportKey:@"USB",@kIOHIDLocationIDKey:@0x12340000,@"service":@1};devices=@[pen];
     [BTPenMonitor configureDisplay:7 pressureExponent:1];BTPenMonitor *m=[BTPenMonitor new];
-    assert(opens==0);assert([m startWithError:NULL]);assert(m.presence==BTPenUnknown);assert([match[@kIOHIDPrimaryUsageKey] isEqual:@2] && [match[@kIOHIDTransportKey] isEqual:@"USB"]);
+    NSDictionary *usbPen=@{@"class":@"IOUSBHostDevice",@"idVendor":@0xed1,@"idProduct":@0x7821,@"locationID":@0x12340000};
+    NSDictionary *interface=@{@"class":@"IOUSBHostInterface"};
+    NSMutableDictionary *noService=[pen mutableCopy];[noService removeObjectForKey:@"service"];
+    devices=@[noService];assert(![m startWithError:NULL] && opens==0);drainMain();
+    devices=@[pen];ancestry=@[interface];assert(![m startWithError:NULL] && opens==0);drainMain();assert(parentRefs==0);
+    // A matching higher ancestor must not rescue a wrong or incomplete nearest device.
+    for(NSString *key in @[@"idVendor",@"idProduct",@"locationID"]) {
+        for(id invalid in @[@7,@"bad",NSNull.null]) {
+            NSMutableDictionary *wrongUSB=[usbPen mutableCopy];wrongUSB[key]=invalid==NSNull.null?nil:invalid;
+            ancestry=@[interface,wrongUSB,usbPen];
+            assert(![m startWithError:NULL] && opens==0);drainMain();assert(parentRefs==0);
+        }
+    }
+    ancestry=@[interface,usbPen];
+    assert([m startWithError:NULL] && opens==1 && parentRefs==0);assert(m.presence==BTPenUnknown);assert([match[@kIOHIDPrimaryUsageKey] isEqual:@2] && [match[@kIOHIDTransportKey] isEqual:@"USB"]);
     __block BTPenPresence seen=BTPenUnknown;m.presenceChanged=^(BTPenPresence p){seen=p;};
     deliver(0x11);assert(seen==BTPenInRange);assert(posts==2);[m stop];drainMain();assert(ups==1 && exits==1 && closes==1);[m stop];drainMain();assert(closes==1);
     assert([m startWithError:NULL]);deliver(0x11);assert(removal && removalContext);deviceRemoval(deviceRemovalContext,0,(__bridge void *)pen);drainMain();assert(!m.running && seen==BTPenUnknown);assert(ups==2 && exits==2 && closes==2);

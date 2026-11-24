@@ -137,7 +137,13 @@ IOReturn ReviewDeviceClose(IOHIDDeviceRef device,IOOptionBits options){
 void ReviewDeviceRemoval(IOHIDDeviceRef device,IOHIDCallback callback,void *context){
     if(callback)removals[(__bridge id)device]=^{callback(context,0,(void *)device);};else [removals removeObjectForKey:(__bridge id)device];
 }
-void ReviewDeviceSchedule(IOHIDDeviceRef device,CFRunLoopRef loop,CFStringRef mode){assert(loop && CFEqual(mode,kCFRunLoopCommonModes));[scheduledTouches addObject:(__bridge id)device];}
+static io_service_t removeDuringSchedule;
+void ReviewDeviceSchedule(IOHIDDeviceRef device,CFRunLoopRef loop,CFStringRef mode){
+    assert(loop && CFEqual(mode,kCFRunLoopCommonModes));[scheduledTouches addObject:(__bridge id)device];
+    if(removeDuringSchedule && ReviewGetService(device)==removeDuringSchedule){
+        removeDuringSchedule=0;removals[(__bridge id)device]();
+    }
+}
 void ReviewDeviceUnschedule(IOHIDDeviceRef device,CFRunLoopRef loop,CFStringRef mode){assert(loop && CFEqual(mode,kCFRunLoopCommonModes));[scheduledTouches removeObject:(__bridge id)device];}
 static void unplugFakeTouch(NSDictionary *device){
     assert([scheduledTouches containsObject:device] && removals[device]);unpluggedDevice=(__bridge IOHIDDeviceRef)device;removals[device]();
@@ -293,9 +299,10 @@ static void resetFakes(void) {
     removals=[NSMutableDictionary dictionary];scheduledTouches=[NSMutableSet set];penReportCallback=NULL;
     requirePalmBeforePen=inRangeReport=pressDuringStartup=NO;nativePenPosts=unprotectedPenPosts=0;
     seizedTouches=[NSMutableSet set];failTouchOpenService=failTouchCloseOnce=0;unpluggedDevice=NULL;reportCallback=NULL;
-    parents=[@{@11:@21,@12:@22,@21:@31,@22:@31} mutableCopy];
+    parents=[@{@11:@21,@12:@22,@21:@31,@22:@31,@41:@51} mutableCopy];
     usbInterfaces=[@{@21:@{@"bInterfaceNumber":@1},@22:@{@"bInterfaceNumber":@0}} mutableCopy];
-    usbNodes=[@{@31:@{@"idVendor":@0x6066,@"idProduct":@1,@"locationID":@0x12340000}} mutableCopy];
+    usbNodes=[@{@31:@{@"idVendor":@0x6066,@"idProduct":@1,@"locationID":@0x12340000},
+                @51:@{@"idVendor":@0xed1,@"idProduct":@0x7821,@"locationID":@0x12340000}} mutableCopy];
 #endif
     fakePen=@{@kIOHIDVendorIDKey:@0x0ed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2};
 #ifdef BT_UNIFIED_DRIVER

@@ -285,6 +285,12 @@ static void checkInputModes(BTTouchController *controller){
         assert([seizedTouches isEqual:held]);
         [controller stop];drainMain();assert(!seizedTouches.count && [[NSSet setWithArray:touchClosed] isEqual:held]);
     }
+    for(int touch=0;touch<2;touch++)for(int pen=0;pen<2;pen++){
+        resetFakes();controller.touchInputEnabled=touch;controller.penInputEnabled=pen;
+        removeDuringSchedule=ReviewGetService((__bridge IOHIDDeviceRef)(touch?testDigitizer():testCompanion()));
+        NSError *error=nil;assert(![controller startWithDisplay:42 postEvents:YES error:&error] && error && !controller.running);
+        drainMain();assert(!seizedTouches.count && !scheduledTouches.count && penOpenCalls==penCloseCalls && !featureWrites);
+    }
     chooseActions(controller,@{});
 }
 static void checkInvalidTouchSelection(BTTouchController *controller){

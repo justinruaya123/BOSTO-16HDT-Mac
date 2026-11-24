@@ -16,16 +16,43 @@ NSArray *UPValidatedBindings(id value) {
     }
     return result;
 }
-static uint32_t number(IOHIDDeviceRef d,CFStringRef key) {
-    CFTypeRef v=IOHIDDeviceGetProperty(d,key);int64_t n=0;
-    if(!v || CFGetTypeID(v)!=CFNumberGetTypeID() || !CFNumberGetValue(v,kCFNumberSInt64Type,&n) || n<0 || n>UINT32_MAX)return UINT32_MAX;
+static uint32_t penUnsignedNumber(CFTypeRef v) {
+    int64_t n=0;
+    if(!v || CFGetTypeID(v)!=CFNumberGetTypeID() || CFNumberIsFloatType(v) || !CFNumberGetValue(v,kCFNumberSInt64Type,&n) || n<0 || n>UINT32_MAX)return UINT32_MAX;
     return (uint32_t)n;
+}
+static uint32_t number(IOHIDDeviceRef d,CFStringRef key) {
+    return penUnsignedNumber(IOHIDDeviceGetProperty(d,key));
+}
+static BOOL penUSBPropertyMatches(io_registry_entry_t node,CFStringRef key,uint32_t expected) {
+    CFTypeRef value=IORegistryEntryCreateCFProperty(node,key,NULL,0);
+    BOOL matches=penUnsignedNumber(value)==expected;
+    if(value)CFRelease(value);
+    return matches;
+}
+static BOOL penHasUSBParent(IOHIDDeviceRef d,uint32_t location) {
+    io_registry_entry_t service=IOHIDDeviceGetService(d),parent=IO_OBJECT_NULL;
+    if(!service || IORegistryEntryGetParentEntry(service,kIOServicePlane,&parent)!=KERN_SUCCESS)return NO;
+    while(parent){
+        // Stop at the nearest physical device; a matching hub cannot vouch for its child.
+        if(IOObjectConformsTo(parent,"IOUSBHostDevice")){
+            BOOL matches=penUSBPropertyMatches(parent,CFSTR("idVendor"),0xed1) &&
+                penUSBPropertyMatches(parent,CFSTR("idProduct"),0x7821) &&
+                penUSBPropertyMatches(parent,CFSTR("locationID"),location);
+            IOObjectRelease(parent);return matches;
+        }
+        io_registry_entry_t next=IO_OBJECT_NULL;
+        kern_return_t result=IORegistryEntryGetParentEntry(parent,kIOServicePlane,&next);
+        IOObjectRelease(parent);if(result!=KERN_SUCCESS)return NO;
+        parent=next;
+    }
+    return NO;
 }
 static BOOL exact(IOHIDDeviceRef d) {
     if(!d)return NO;
     CFTypeRef transport=IOHIDDeviceGetProperty(d,CFSTR(kIOHIDTransportKey));
     uint32_t location=number(d,CFSTR(kIOHIDLocationIDKey));
-    return transport && CFEqual(transport,CFSTR("USB")) && location!=0 && location!=UINT32_MAX && number(d,CFSTR(kIOHIDVendorIDKey))==0xed1 && number(d,CFSTR(kIOHIDProductIDKey))==0x7821 && number(d,CFSTR(kIOHIDPrimaryUsagePageKey))==13 && number(d,CFSTR(kIOHIDPrimaryUsageKey))==2;
+    return transport && CFEqual(transport,CFSTR("USB")) && location!=0 && location!=UINT32_MAX && number(d,CFSTR(kIOHIDVendorIDKey))==0xed1 && number(d,CFSTR(kIOHIDProductIDKey))==0x7821 && number(d,CFSTR(kIOHIDPrimaryUsagePageKey))==13 && number(d,CFSTR(kIOHIDPrimaryUsageKey))==2 && penHasUSBParent(d,location);
 }
 @interface BTPenMonitor () {
     IOHIDManagerRef _manager;
