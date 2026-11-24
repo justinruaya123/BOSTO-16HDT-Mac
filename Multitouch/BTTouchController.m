@@ -68,15 +68,15 @@ static uint64_t touchUSBIdentity(IOHIDDeviceRef device, BOOL companion) {
 }
 // Pin the actual retained HID objects before the first exclusive open. No opened
 // manager or matching notification can extend these claims to hot-plugged devices.
-static NSArray *selectedTouchDevices(BOOL touchEnabled){
+static NSArray *selectedTouchDevices(BOOL requireCompanion){
     IOHIDManagerRef discovery=IOHIDManagerCreate(NULL,kIOHIDManagerOptionIndependentDevices);
     if(!discovery)return nil;
-    // On: leave the native Apple gesture companion entirely to macOS.
-    NSArray *matches=touchEnabled?@[matching().firstObject]:matching();
+    // Pinning is discovery only; touch-only sessions never need the companion.
+    NSArray *matches=requireCompanion?matching():@[matching().firstObject];
     IOHIDManagerSetDeviceMatchingMultiple(discovery,(__bridge CFArrayRef)matches);
     NSSet *devices=CFBridgingRelease(IOHIDManagerCopyDevices(discovery));
     CFRelease(discovery);
-    if(devices.count!=(touchEnabled?1:2))return nil;
+    if(devices.count!=(requireCompanion?2:1))return nil;
     id digitizer=nil,companion=nil;uint64_t physical=0;
     for(id object in devices){
         IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)object;
@@ -87,8 +87,8 @@ static NSArray *selectedTouchDevices(BOOL touchEnabled){
         physical=identity;
         if(isCompanion)companion=object;else digitizer=object;
     }
-    if(!digitizer || (!touchEnabled && !companion))return nil;
-    return touchEnabled?@[digitizer]:@[digitizer,companion];
+    if(!digitizer || (requireCompanion && !companion))return nil;
+    return requireCompanion?@[digitizer,companion]:@[digitizer];
 }
 NSArray<NSNumber *> *BTTabletRegistryIdentity(void) {
     IOHIDManagerRef manager=IOHIDManagerCreate(NULL,kIOHIDOptionsTypeNone);
@@ -145,7 +145,9 @@ NSArray<NSDictionary *> *BTAvailableDisplays(void) {
 #ifdef BT_UNIFIED_DRIVER
     BOOL _unifiedStopping,_unifiedCleaning,_touchReportExpired,_sessionPenEnabled;
     NSArray *_pinnedTouches;
-    NSUInteger _openedTouchCount;
+    NSUInteger _openedTouchCount,_scheduledTouchCount;
+    BOOL _startingPalmSession,_palmCompanionHeld,_touchLevelKnown;
+    unsigned _unclearedStreams; // Held or uncertain level per format, including ignored duplicates.
     uint8_t _reportBuffer[BT_TOUCH_REPORT_SIZE];
 #endif
     BTGestureState _gestures;
@@ -254,6 +256,13 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     return NO;
 }
 #ifdef BT_UNIFIED_DRIVER
+// Synchronous HID calls during startup may deliver a pen/removal callback.
+// A failed callback must not be overwritten by the rest of startup.
+- (BOOL)startupStopped:(NSError **)error {
+    if(!_unifiedStopping && _pinnedTouches)return NO;
+    if(error)*error=[NSError errorWithDomain:@"local.BostoTablet" code:10 userInfo:@{NSLocalizedDescriptionKey:self.status}];
+    return YES;
+}
 - (void)unifiedPenFailed:(NSNotification *)note {
     if(note.object!=_penMonitor)return;
     [self stop];self.status=note.userInfo[@"reason"]?:@"Unified pen failed; both streams disabled.";
@@ -262,6 +271,9 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 - (BOOL)initializeDigitizer:(IOHIDDeviceRef)digitizer error:(NSError **)error {
     _firmware[0]=9;CFIndex versionLength=sizeof _firmware;
     IOReturn result=IOHIDDeviceGetReport(digitizer,kIOHIDReportTypeFeature,9,_firmware,&versionLength);
+#ifdef BT_UNIFIED_DRIVER
+    if([self startupStopped:error])return NO;
+#endif
     if(result!=kIOReturnSuccess || versionLength!=3 || _firmware[0]!=9 || _firmware[1]!=1 || _firmware[2]!=26){
         return [self fail:@"Unexpected touch-controller firmware; no configuration written." code:5 error:error];
     }
@@ -270,6 +282,9 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
         // Enables touch on 6066:0001. Never sent to a pen, and never a firmware flash.
         const uint8_t command[3]={3,0x0b,0};_configurationWrites++;
         result=IOHIDDeviceSetReport(digitizer,kIOHIDReportTypeFeature,3,command,sizeof command);
+#ifdef BT_UNIFIED_DRIVER
+        if([self startupStopped:error])return NO;
+#endif
         if(result!=kIOReturnSuccess){
             return [self fail:[NSString stringWithFormat:@"Touch initialization failed (0x%08x); pen unchanged.",result] code:result error:error];
         }
@@ -319,9 +334,9 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #ifdef BT_UNIFIED_DRIVER
     _postEvents=self.touchInputEnabled; // Unified observe mode is rejected above.
     _sessionPenEnabled=self.penInputEnabled;
-    _pinnedTouches=selectedTouchDevices(_postEvents);
+    _pinnedTouches=selectedTouchDevices(!_postEvents || _sessionPenEnabled);
     if(!_pinnedTouches)return [self fail:@"Could not identify the exact Bosto USB touch interfaces for this mode; nothing opened." code:4 error:error];
-    _devices=_pinnedTouches.count;
+    _touchLevelKnown=NO;_unclearedStreams=0;
     IOHIDDeviceRef digitizer=(__bridge IOHIDDeviceRef)_pinnedTouches[0];
 #else
     _postEvents=postEvents;
@@ -345,23 +360,31 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     _penMonitor=[BTPenMonitor new];
 #ifdef BT_UNIFIED_DRIVER
     _penMonitor.penInputEnabled=_sessionPenEnabled;
+    _startingPalmSession=_postEvents && _sessionPenEnabled;
 #endif
     __weak BTTouchController *weakSelf=self;
     _penMonitor.presenceChanged=^(BTPenPresence presence){[weakSelf penChanged:presence];};
     NSError *penError=nil;
     if(![_penMonitor startWithError:&penError])return [self fail:penError.localizedDescription code:6 error:error];
 #ifdef BT_UNIFIED_DRIVER
+    if([self startupStopped:error])return NO;
     _ownerLoop=(CFRunLoopRef)CFRetain(CFRunLoopGetCurrent());
     for(id object in _pinnedTouches){
         IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)object;
-        IOReturn result=IOHIDDeviceOpen(device,kIOHIDOptionsTypeSeizeDevice);
-        if(result!=kIOReturnSuccess){
-            return [self fail:[NSString stringWithFormat:@"Cannot claim the selected Bosto touch interface (0x%08x).",result] code:result error:error];
+        // When both inputs are enabled, monitor the pinned companion for removal
+        // but leave its native input path open to macOS until confirmed proximity.
+        if(device==digitizer || !_postEvents){
+            IOReturn result=IOHIDDeviceOpen(device,kIOHIDOptionsTypeSeizeDevice);
+            if(result!=kIOReturnSuccess){
+                return [self fail:[NSString stringWithFormat:@"Cannot claim the selected Bosto touch interface (0x%08x).",result] code:result error:error];
+            }
+            _openedTouchCount++;_devices=_openedTouchCount+(_palmCompanionHeld?1:0);
         }
-        _openedTouchCount++;
         IOHIDDeviceRegisterRemovalCallback(device,touchDeviceRemoved,(__bridge void *)self);
         if(device==digitizer && _postEvents)IOHIDDeviceRegisterInputReportCallback(device,_reportBuffer,sizeof _reportBuffer,received,(__bridge void *)self);
         IOHIDDeviceScheduleWithRunLoop(device,_ownerLoop,kCFRunLoopCommonModes);
+        _scheduledTouchCount++;
+        if([self startupStopped:error])return NO;
     }
 #else
     IOHIDManagerRegisterInputReportCallback(_manager,received,(__bridge void *)self);
@@ -379,10 +402,14 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #ifdef BT_UNIFIED_DRIVER
     // Seizing both exact interfaces is sufficient to mute; do not configure them.
     if(_postEvents && ![self initializeDigitizer:digitizer error:error])return NO;
+    _startingPalmSession=NO;
 #else
     if(![self initializeDigitizer:digitizer error:error])return NO;
 #endif
     self.running=YES;[self penChanged:_penMonitor.presence];
+#ifdef BT_UNIFIED_DRIVER
+    if([self startupStopped:error])return NO;
+#endif
     self.watchdog=[NSTimer timerWithTimeInterval:0.05 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.currentRunLoop addTimer:self.watchdog forMode:NSRunLoopCommonModes];
     return YES;
@@ -395,7 +422,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(![self dispatchBatch:batch valid:YES])return NO;
     if(!valid)return NO;
     [NSUserDefaults.standardUserDefaults setDouble:seconds forKey:resumeDelayKey];
-    if(self.running)[self updateStatus];
+    if(self.running)[self refreshTouchState];
     return YES;
 }
 - (BOOL)emit:(BTGestureEvent)event {
@@ -510,34 +537,67 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
         // gesture so the real lift can finish it. Do not interrupt the pen.
         if(![self releaseHeldGesture])return;
         BTGestureBatch batch={0};BTGestureCancel(&_gestures,&batch);
-        [self updateStatus];
+        [self refreshTouchState];
     }
     _flipTouchY=flipTouchY;
 }
+// The pen monitor publishes proximity synchronously on the owner loop before posting pen events.
+- (BOOL)acquirePalmCompanion {
+    if(_palmCompanionHeld)return YES;
+    IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)_pinnedTouches[1];
+    IOReturn result=IOHIDDeviceOpen(device,kIOHIDOptionsTypeSeizeDevice);
+    if(result!=kIOReturnSuccess){
+        [self stop];self.status=[NSString stringWithFormat:@"Cannot claim the Bosto native touch companion (0x%08x); palm rejection unavailable, driver stopped.",result];return NO;
+    }
+    _palmCompanionHeld=YES;_devices=_openedTouchCount+1;return YES;
+}
+- (BOOL)releasePalmCompanionIfReady:(double)time {
+    if(!_palmCompanionHeld || _gestures.pen!=BTPenOutOfRange || !_gestures.penOutSeen ||
+       time-_gestures.penOutAt<_gestures.config.resumeDelay || !_touchLevelKnown || _unclearedStreams)return YES;
+    IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)_pinnedTouches[1];
+    IOReturn result=IOHIDDeviceClose(device,kIOHIDOptionsTypeSeizeDevice);
+    if(result!=kIOReturnSuccess){
+        [self stop];self.status=[NSString stringWithFormat:@"Cannot release the Bosto native touch companion (0x%08x); driver stopped.",result];return NO;
+    }
+    _palmCompanionHeld=NO;_devices=_openedTouchCount;
+    // Proximity already cancelled any gesture. End its blocked contact sequence
+    // only on a known clean boundary, never by synthesizing a timeout lift.
+    _contacts=0;_activeReportID=0;_vendorNeedsLift=NO;_touchReportExpired=NO;_gestureShortcutConsumed=NO;
+    BTGestureBatch batch={0};
+    BOOL valid=BTGestureHandleTouch(&_gestures,(BTGestureTouchInput){.bounds=_bounds,.time=time},&batch);
+    return [self dispatchBatch:batch valid:valid];
+}
 #endif
-- (void)updateStatus {
+- (void)refreshTouchState {
 #ifdef BT_UNIFIED_DRIVER
+    if(![self releasePalmCompanionIfReady:now()])return;
     if(!_postEvents){self.status=_sessionPenEnabled?@"Touch muted — pen enabled.":@"Touch and pen muted — driver running.";return;}
 #endif
     if(BTGestureGetReadiness(&_gestures,now())==BTGestureReadinessUnknown){self.status=_penMonitor.status;return;}
     if(_gestures.pen==BTPenInRange){self.status=@"Pen in range — touch suppressed.";return;}
     double remaining=_gestures.penOutSeen?_gestures.config.resumeDelay-(now()-_gestures.penOutAt):0;
     if(remaining>0){self.status=[NSString stringWithFormat:@"Pen left — touch resumes in %.1f seconds. Lift resting fingers.",remaining];return;}
+#ifdef BT_UNIFIED_DRIVER
+    if(_palmCompanionHeld){self.status=@"Lift all fingers to resume native Bosto touch.";return;}
+#endif
     if(_gestures.mode==BTGestureBlocked){self.status=@"Lift all fingers to resume touch.";return;}
     self.status=_postEvents?@"Multitouch ready — tap/drag, two-finger pan or pinch.":@"Observing touch and shared pen proximity — no configuration writes or input posting.";
 }
 - (void)penChanged:(BTPenPresence)presence {
-    if(!self.running)return;
 #ifdef BT_UNIFIED_DRIVER
-    if(!_postEvents || !_sessionPenEnabled){[self updateStatus];return;}
+    if(!self.running && !_startingPalmSession)return;
+    if(!_postEvents || !_sessionPenEnabled){[self refreshTouchState];return;}
+    if(presence==BTPenInRange && ![self acquirePalmCompanion])return;
+#else
+    if(!self.running)return;
 #endif
     BTGestureBatch batch={0};
     BOOL valid=BTGestureHandlePen(&_gestures,(BTGesturePenInput){presence,now()},&batch);
-    if([self dispatchBatch:batch valid:valid])[self updateStatus];
+    if([self dispatchBatch:batch valid:valid])[self refreshTouchState];
 }
 - (void)received:(uint8_t *)bytes length:(CFIndex)length reportID:(uint32_t)reportID sender:(void *)sender result:(IOReturn)result {
 #ifdef BT_UNIFIED_DRIVER
-    if(!self.running || !_postEvents || sender!=(__bridge void *)_pinnedTouches.firstObject)return;
+    if((!self.running && !_startingPalmSession) || !_postEvents || sender!=(__bridge void *)_pinnedTouches.firstObject)return;
 #else
     if(!self.running || !isTouch((IOHIDDeviceRef)sender))return;
 #endif
@@ -547,13 +607,33 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(reportID!=3 && reportID!=4)return;
     if(property((IOHIDDeviceRef)sender,kIOHIDPrimaryUsagePageKey)!=13)return;
     _reports++;BTTouchFrame frame={0};
-    if(result!=kIOReturnSuccess || length<=0 || !bytes || bytes[0]!=reportID || !BTParseTouchReport(bytes,(size_t)length,&frame)){_invalid++;return;}
+    if(result!=kIOReturnSuccess || length<=0 || !bytes || bytes[0]!=reportID || !BTParseTouchReport(bytes,(size_t)length,&frame)){
+#ifdef BT_UNIFIED_DRIVER
+        // A missing/malformed sample may be a down. Do not hand a potentially
+        // held contact to macOS based on an older clear from either format.
+        _unclearedStreams|=1u<<reportID;
+#endif
+        _invalid++;return;
+    }
     _valid++;
     _peakContacts=MAX(_peakContacts,frame.count);
     if(frame.count>=2)_multiContactFrames++;
+    if(reportID==4 && frame.count)_report4Seen=YES;
     double time=now();
+#ifdef BT_UNIFIED_DRIVER
+    // Observe both formats before arbitration: the losing stream can still
+    // report a held finger, and a zero from the other is not proof of its lift.
+    unsigned stream=1u<<reportID;
+    _touchLevelKnown=YES;
+    if(frame.count)_unclearedStreams|=stream;else _unclearedStreams&=~stream;
+    if(_palmCompanionHeld || !self.running){
+        // During startup remember contacts but never synthesize touch events.
+        if(reportID==4 && (frame.count || _activeReportID==4))_report4PreferredUntil=time+0.5;
+        _contacts=frame.count?:(_unclearedStreams?1:0);_lastFrameAt=time;
+        [self refreshTouchState];return;
+    }
+#endif
     if(reportID==4) {
-        if(frame.count)_report4Seen=YES;
         // A live contact or its release may have trailing duplicates. Idle
         // empty report 4 packets must not keep the fallback locked out.
         if(frame.count || _activeReportID==4)_report4PreferredUntil=time+0.5;
@@ -594,7 +674,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #ifdef BT_UNIFIED_DRIVER
     if(!frame.count || (frame.count==2 && _gestures.mode==BTGestureTwoPending))_touchReportExpired=NO;
 #endif
-    [self updateStatus];
+    [self refreshTouchState];
 }
 - (void)tick:(NSTimer *)timer {
     (void)timer;if(!self.running)return;
@@ -608,6 +688,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(_postEvents && !CGPreflightPostEventAccess()){[self stop];self.status=@"Accessibility permission lost; disabled.";return;}
 #ifdef BT_UNIFIED_DRIVER
     if(!_postEvents)return;
+    if(_palmCompanionHeld){[self refreshTouchState];return;}
 #endif
     double time=now();
     // Check freshness before arming a pending one-finger press.
@@ -627,15 +708,15 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #endif
     }
     BTGestureBatch batch={0};BOOL valid=BTGestureTick(&_gestures,time,&batch);
-    if([self dispatchBatch:batch valid:valid])[self updateStatus];
+    if([self dispatchBatch:batch valid:valid])[self refreshTouchState];
 }
 - (void)controllerRemoved:(IOHIDDeviceRef)device {
-    if(!self.running)return;
 #ifdef BT_UNIFIED_DRIVER
+    if(!self.running && !_startingPalmSession)return;
     // Do not re-read properties on an already detached service.
     if([_pinnedTouches indexOfObjectIdenticalTo:(__bridge id)device]==NSNotFound)return;
 #else
-    if(!isTouch(device))return;
+    if(!self.running || !isTouch(device))return;
 #endif
     [self stop];self.status=@"Touchscreen disconnected. Reconnect, then Enable.";
 }
@@ -651,6 +732,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 - (void)stop {
     self.running=NO;[self.watchdog invalidate];self.watchdog=nil;
 #ifdef BT_UNIFIED_DRIVER
+    _startingPalmSession=NO;
     if(_unifiedStopping)return;
     _penMonitor.presenceChanged=nil;[_penMonitor stop];
     if(!_pinnedTouches)return;
@@ -663,14 +745,19 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     [self cancelGesture];
     _penMonitor.presenceChanged=nil;[_penMonitor stop];
 #ifdef BT_UNIFIED_DRIVER
-    for(NSUInteger i=0;i<_openedTouchCount;i++){
+    for(NSUInteger i=0;i<_pinnedTouches.count;i++){
         IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)_pinnedTouches[i];
-        if(i==0 && _postEvents)IOHIDDeviceRegisterInputReportCallback(device,_reportBuffer,sizeof _reportBuffer,NULL,NULL);
-        IOHIDDeviceRegisterRemovalCallback(device,NULL,NULL);
-        IOHIDDeviceUnscheduleFromRunLoop(device,_ownerLoop,kCFRunLoopCommonModes);
-        (void)IOHIDDeviceClose(device,kIOHIDOptionsTypeSeizeDevice);
+        if(i<_scheduledTouchCount){
+            if(i==0 && _postEvents)IOHIDDeviceRegisterInputReportCallback(device,_reportBuffer,sizeof _reportBuffer,NULL,NULL);
+            IOHIDDeviceRegisterRemovalCallback(device,NULL,NULL);
+            IOHIDDeviceUnscheduleFromRunLoop(device,_ownerLoop,kCFRunLoopCommonModes);
+        }
+        if(i<_openedTouchCount || (i==1 && _palmCompanionHeld)){
+            IOReturn result=IOHIDDeviceClose(device,kIOHIDOptionsTypeSeizeDevice);
+            if(result!=kIOReturnSuccess)self.status=[NSString stringWithFormat:@"%@ Bosto HID close returned 0x%08x.",self.status,result];
+        }
     }
-    _openedTouchCount=0;_pinnedTouches=nil;
+    _palmCompanionHeld=NO;_openedTouchCount=_scheduledTouchCount=0;_pinnedTouches=nil;
 #else
     if(_manager) {
         IOHIDManagerRegisterInputReportCallback(_manager,NULL,NULL);
@@ -692,13 +779,21 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #endif
 }
 - (NSDictionary *)snapshot {
-    return @{@"running":@(self.running),@"status":self.status?:@"",@"displayID":@(_display),@"interfaces":@(_devices),
+    BTGestureReadiness readiness=self.running?BTGestureGetReadiness(&_gestures,now()):BTGestureReadinessUnknown;
+#ifdef BT_UNIFIED_DRIVER
+    if(_palmCompanionHeld && readiness==BTGestureReadinessReady)readiness=BTGestureReadinessLiftRequired;
+#endif
+    return @{
+#ifdef BT_UNIFIED_DRIVER
+             @"palmCompanionHeld":@(_palmCompanionHeld),
+#endif
+             @"running":@(self.running),@"status":self.status?:@"",@"displayID":@(_display),@"interfaces":@(_devices),
              @"reports":@(_reports),@"rawReports":@(_rawReports),@"rawReportIDs":[_rawReportIDs copy]?:@{},@"activeReportID":@(_activeReportID),
              @"validFrames":@(_valid),@"invalidFrames":@(_invalid),@"activeContacts":@(_contacts),@"peakContacts":@(_peakContacts),@"multiContactFrames":@(_multiContactFrames),
              @"firmwareReport":@[@(_firmware[0]),@(_firmware[1]),@(_firmware[2])],@"configurationWrites":@(_configurationWrites),@"touchConfigurationAccepted":@(_touchConfigurationAccepted),
              @"pointerDown":@(_heldEvent.phase!=BTGesturePhaseNone && (_heldEvent.kind==BTGesturePointerDown || _heldEvent.kind==BTGesturePointerDrag)),
              @"downEvents":@(_downs),@"dragEvents":@(_drags),@"upEvents":@(_ups),@"scrollEvents":@(_scrollEvents),@"magnifyEvents":@(_magnifyEvents),@"cancelEvents":@(_cancelEvents),
-             @"gestureReadiness":@(self.running?BTGestureGetReadiness(&_gestures,now()):BTGestureReadinessUnknown),@"gestureMode":@(_gestures.mode),@"resumeDelay":@(self.resumeDelay),@"report4Seen":@(_report4Seen),
+             @"gestureReadiness":@(readiness),@"gestureMode":@(_gestures.mode),@"resumeDelay":@(self.resumeDelay),@"report4Seen":@(_report4Seen),
              @"cursorQuartz":@[@(_gestures.x),@(_gestures.y)],@"postsMouseEvents":@(_postEvents),@"postsGestureEvents":@(_postEvents),
              @"penObserver":_penMonitor.snapshot?:@{},@"penAccessed":@(_penMonitor.running),@"penSeized":@NO};
 }
