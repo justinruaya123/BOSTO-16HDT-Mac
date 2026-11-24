@@ -1,13 +1,21 @@
 # BostoTablet unified driver
 
 An Apple Silicon-only arm64 app (`local.BostoTablet`) and one component package targeting
-`/Applications/BostoTablet.app`. Launch only detects and preselects the saved
-display or a unique nonmirrored Bosto Tablet display. It never starts pen/touch
-or requests permissions. Press Enable to request missing permissions or start
-the session; after granting access, press Enable again. Quitting, disabling, display
-changes, sleep/session changes, permission loss, or device failures release the
-owned streams. Optional Open at Login uses macOS 13+ SMAppService and opens the app only;
-pen and touch still require Enable. No launch
+`/Applications/BostoTablet.app`. **Auto-detect tablet** is on by default:
+launch and display changes select a unique nonmirrored Bosto Tablet display.
+With auto-detect off, the app restores the manually chosen display by UUID.
+Pen and touch start automatically when a safe display and the exact USB pen
+and touchscreen are present and both macOS permissions are granted. The app
+waits for late connections and resumes after wake or a session switch. It
+tries each detected configuration once; a failed start does not loop.
+Disable persists until explicitly enabled. Automatic startup never requests
+permissions; use the setup button for missing grants.
+**Touch orientation** offers Normal and Flip vertical, persists immediately,
+and changes finger mapping only. Changing it during a gesture releases that
+output and waits for lift without restarting the input session. Quitting,
+disabling, an affected display change, sleep/session changes, permission loss,
+or device failures release the owned streams. Optional Open at Login uses macOS 13+
+SMAppService and follows the same startup rules. No launch
 agent, install scripts, pen writes, Wacom
 settings, mouse settings, or vendor executables are included.
 
@@ -27,7 +35,8 @@ settings, mouse settings, or vendor executables are included.
   only the selected exact device is opened/seized, only while enabled. No pen
   feature reads or writes. Other report IDs are counted and ignored. Invalid
   report 1 fails closed. Stop emits tip up/proximity exit and closes even a failed
-  open attempt. Input state starts unknown, suppressing touch until valid data.
+  open attempt. On startup, unknown proximity is reported honestly but does not
+  block touch before the first accepted pen report.
   Direct device-removal and manager-removal callbacks both terminate the stream.
 - `main.m`: controls, display selection shared by pen and touch, saved pressure sensitivity
   (exponent 0.25–4, default linear 1), touch resume delay (0–30 seconds, fresh default 2), status
@@ -50,8 +59,10 @@ The reused `Multitouch/BT16Touch.c`, `BTGestures.c`, `BTTouchController.m`,
 first-finger pointer/tap/drag, two-finger scroll/pan and pinch, display handling,
 palm rejection and cancellation. The replacement pen monitor publishes InRange
 from the same packet that produces pen events, before pen events are posted.
-Unknown presence also suppresses touch. Following an observed exit, the delay
-starts at exit; fingers resting through suppression must lift before resuming.
+Touch can start before the first pen packet; once the pen is confirmed nearby,
+report silence does not end palm rejection. Following an observed exit, the
+configured delay starts at exit; fingers resting through suppression must lift
+before resuming.
 
 The reused touch controller retains its existing exact `6066:0001` firmware
 `[9,1,26]` gate and feature command `[3,0x0b,0]` when enabled. That command goes
@@ -90,14 +101,14 @@ stop (reset on the next start). This watchdog does not alter the distinct palm
 cooldown. **The stationary-tip report gap and 2-second watchdog threshold have
 not been physically validated.**
 
-In BostoTablet, the touch controller also cancels a pending or active gesture
-after 0.5 seconds without a valid frame on its selected report stream. Cancellation
-is one-shot until a real no-contact frame on that stream; held contacts cannot
-produce phantom taps, drags, scrolls or pinches. Both sessions and their HID handles
-remain open. Once contacts lift, fresh input works without Enable. Readiness stays
-ready during ordinary inactivity when the pen is confirmed out and no contacts
-are blocked. The separate standalone Multitouch build retains its previous timeout
-behavior through `BT_UNIFIED_DRIVER`.
+In BostoTablet, 0.5 seconds without a valid frame on the selected touch stream
+cancels the stalled gesture once, without closing either HID connection. A lone
+contact still needs a real lift before it can click again. A valid two-contact
+frame can establish a new motion baseline immediately; scroll or pinch must
+still cross the normal motion threshold, and never replays old movement or
+presses. Pen suppression still requires lift and cannot use this recovery path.
+Ordinary idle periods with no contacts leave touch ready. The standalone
+Multitouch build retains its previous timeout behavior.
 
 The pen protocol is restricted to exact `0ED1:7821 / 0D:02`, report 1.
 Legacy `0ED1:782C` is unsupported: its bit packing and device behavior differ.
@@ -155,11 +166,26 @@ There is no pressure/tilt claim beyond the descriptor fields. Pressure conversio
 through AppKit mouse events has 8-bit quantization; the tablet pressure field is
 also checked separately with its finer native quantization tolerance.
 
+## Gesture settings
+
+The **Gestures** tab offers **Default**, **Keyboard Shortcut**, and **Off**
+separately for two-finger swipe and pinch. Default uses native horizontal and
+vertical scroll events for pan/scroll and native magnify events for pinch.
+A recorded key runs once per recognized gesture in the focused app. These
+settings apply from the next gesture and don't replace single-finger taps,
+drags, or palm rejection.
+
+If gestures do not respond, check **reports with 2+ contacts** after a swipe.
+A count of zero means no valid multi-contact frame was decoded in that session;
+it does not by itself distinguish hardware, report acquisition, or parsing.
+The event counters show what the driver posted, not what an app handled.
+
 ## Pen controls
 
-The window has native Home / Setup, Pen and Buttons tabs. Home keeps
+Home / Setup keeps
 its display, enable/disable, delay, status and diagnostics controls. Startup makes
-one permission-gated attempt; failures require manual Enable. Pen has a continuous Softer–Linear–Firmer slider and Reset to linear.
+one permission-gated attempt per detected configuration. Pen has a continuous
+Softer–Linear–Firmer slider and Reset to linear.
 Changes save immediately and update the running pen without reopening HID or
 changing the display. `UPPressure` is the single mapping used by native outgoing
 events and the live tester. The tester consumes only accepted exact pen packets,

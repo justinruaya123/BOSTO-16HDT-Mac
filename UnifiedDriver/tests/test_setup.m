@@ -65,6 +65,8 @@ int main(void) { @autoreleasepool {
     assert(UPSetupMenuState(state,YES,NO,NO)==UPMenuUnavailable);
     assert(UPSetupMenuState(state,YES,YES,YES)==UPMenuUnavailable);
     state[@"penObserver"]=@{@"running":@YES,@"presence":@"unknown"};
+    assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch); // The touch policy is already ready.
+    state[@"gestureReadiness"]=@(BTGestureReadinessUnknown);
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
     state[@"running"]=@NO;assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
     puts("Setup status and one-per-click permission routing checks passed (offline).");

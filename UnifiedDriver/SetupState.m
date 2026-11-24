@@ -4,8 +4,6 @@
 UPMenuState UPSetupMenuState(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
     if(fault || !listenGranted || !postGranted || ![snapshot[@"running"] boolValue] ||
        ![snapshot[@"penObserver"][@"running"] boolValue])return UPMenuUnavailable;
-    NSString *presence=snapshot[@"penObserver"][@"presence"];
-    if(![presence isEqual:@"inRange"] && ![presence isEqual:@"outOfRange"])return UPMenuUnavailable;
     switch([snapshot[@"gestureReadiness"] unsignedIntegerValue]) {
         case BTGestureReadinessPen:return UPMenuPen;
         case BTGestureReadinessReady:return UPMenuTouch;

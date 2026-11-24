@@ -111,11 +111,28 @@ python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
 
 ## Permissions and validation limits
 
-The package targets `/Applications/BostoTablet.app`. For manual use, launch the
-app, check the detected/preselected display, and press **Enable**. Launching
-(including Open at Login) never starts pen/touch or requests permissions. macOS Input Monitoring and
-Accessibility permissions are needed for device access and event posting;
-grant them to BostoTablet in System Settings when requested, then retry Enable.
+The package targets `/Applications/BostoTablet.app`. **Auto-detect tablet** is
+on by default and selects a unique nonmirrored **Bosto Tablet**, even if a
+manual display was previously saved. Turn it off to choose a display manually.
+**Touch orientation → Flip vertical** reverses only finger-touch Y; choose
+**Normal** to restore the original mapping. Both settings persist.
+BostoTablet opens only the touchscreen digitizer (`0D:04`) for touch input. It leaves the companion interface (`01:02`) available to macOS for native multitouch.
+
+**Gestures** keeps native two-finger scroll/pan and pinch zoom by default.
+Either gesture can run a recorded keyboard shortcut instead or be turned off.
+The tab shows how many reports carried multiple contacts; those counts do not
+prove an app received the resulting gesture.
+
+BostoTablet starts pen and touch automatically when the selected display, exact
+USB interfaces, and existing macOS permissions are ready. It also resumes on
+reconnect or wake. **Disable pen and touch** stays off until explicitly enabled.
+Automatic startup never prompts for permission; use the setup button for missing
+Input Monitoring or Accessibility grants. Open at Login remains optional.
+
+Touch works before the first pen report. Confirmed pen proximity pauses touch
+for palm rejection; touch resumes after the configured delay and any resting
+fingers lift. A gap in input reports does not disable either stream. Actual
+system sleep or a user-session switch pauses input for safety until you return.
 Unsigned/unnotarized distribution remains subject to macOS Gatekeeper checks.
 
 CI does not launch the GUI, access live HID devices, post live input, install the

@@ -6,6 +6,7 @@
 #include <math.h>
 #ifdef BT_UNIFIED_DRIVER
 #import <os/log.h>
+#import "UnifiedPen.h"
 #endif
 
 static uint32_t property(IOHIDDeviceRef device, const char *key) {
@@ -21,6 +22,31 @@ static NSArray *matching(void) {
 static BOOL isTouch(IOHIDDeviceRef device) {
     return device && BTMatchesTouchDevice(property(device,kIOHIDVendorIDKey),property(device,kIOHIDProductIDKey),property(device,kIOHIDPrimaryUsagePageKey),property(device,kIOHIDPrimaryUsageKey));
 }
+#ifdef BT_UNIFIED_DRIVER
+NSArray<NSNumber *> *BTTabletRegistryIdentity(void) {
+    IOHIDManagerRef manager=IOHIDManagerCreate(NULL,kIOHIDOptionsTypeNone);
+    if(!manager)return nil;
+    NSArray *devicesToMatch=@[matching()[0],
+        @{@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2}];
+    IOHIDManagerSetDeviceMatchingMultiple(manager,(__bridge CFArrayRef)devicesToMatch);
+    CFSetRef devices=IOHIDManagerCopyDevices(manager);
+    NSNumber *touch=nil,*pen=nil;
+    if(devices && CFSetGetCount(devices)==2){
+        for(id object in (__bridge NSSet *)devices){
+            IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)object;
+            io_service_t service=IOHIDDeviceGetService(device);
+            uint64_t registryID=0;
+            if(!service || IORegistryEntryGetRegistryEntryID(service,&registryID)!=KERN_SUCCESS || !registryID)continue;
+            if(isTouch(device) && property(device,kIOHIDPrimaryUsagePageKey)==13)touch=@(registryID);
+            if(property(device,kIOHIDVendorIDKey)==0xed1 && property(device,kIOHIDProductIDKey)==0x7821 &&
+                property(device,kIOHIDPrimaryUsagePageKey)==13 && property(device,kIOHIDPrimaryUsageKey)==2)pen=@(registryID);
+        }
+    }
+    if(devices)CFRelease(devices);
+    CFRelease(manager);
+    return touch && pen?@[touch,pen]:nil;
+}
+#endif
 static double now(void) { return NSProcessInfo.processInfo.systemUptime; }
 static NSString *const resumeDelayKey=@"TouchResumeDelay";
 static BTDisplayBounds boundsFor(CGDirectDisplayID display) {
@@ -57,9 +83,15 @@ NSArray<NSDictionary *> *BTAvailableDisplays(void) {
     CGDirectDisplayID _display;
     BOOL _postEvents;
     NSUInteger _devices, _reports, _rawReports, _valid, _invalid, _downs, _drags, _ups, _contacts;
+    NSUInteger _multiContactFrames, _peakContacts;
+#ifdef BT_UNIFIED_DRIVER
+    id _activeGestureAction;
+    BOOL _gestureShortcutConsumed;
+#endif
     NSUInteger _scrollEvents, _magnifyEvents, _cancelEvents;
     uint32_t _activeReportID;
-    BOOL _report4Seen;
+    BOOL _report4Seen, _vendorNeedsLift;
+    double _report4PreferredUntil;
     uint8_t _firmware[3];
     NSUInteger _configurationWrites;
     BOOL _touchConfigurationAccepted;
@@ -167,19 +199,35 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted)return [self fail:@"Input Monitoring permission required. Grant it, then Enable again." code:2 error:error];
     if(postEvents && !CGPreflightPostEventAccess())return [self fail:@"Accessibility permission required. Grant it, then Enable again." code:3 error:error];
     _reports=_rawReports=_valid=_invalid=_downs=_drags=_ups=_contacts=0; _devices=0;
+    _multiContactFrames=_peakContacts=0;
+#ifdef BT_UNIFIED_DRIVER
+    _gestureShortcutConsumed=NO;
+#endif
     _scrollEvents=_magnifyEvents=_cancelEvents=0;_heldEvent=(BTGestureEvent){0};
     BTGestureConfig config=BTGestureDefaultConfig();config.resumeDelay=self.resumeDelay;
+#ifdef BT_UNIFIED_DRIVER
+    config.allowTouchBeforePenReport=true;
+#endif
     (void)BTGestureInit(&_gestures,config);
 #ifdef BT_UNIFIED_DRIVER
     _touchReportExpired=NO;
 #endif
-    _activeReportID=0;_report4Seen=NO;_rawReportIDs=[NSMutableDictionary dictionary];
+    _activeReportID=0;_report4Seen=_vendorNeedsLift=NO;_report4PreferredUntil=-INFINITY;
+    _rawReportIDs=[NSMutableDictionary dictionary];
     memset(_firmware,0,sizeof _firmware);_configurationWrites=0;_touchConfigurationAccepted=NO;
     _postEvents=postEvents; _lastFrameAt=now(); _lastDownAt=-INFINITY;_clickCount=1;
     _initialDevices=[NSMutableSet set];
     _manager=IOHIDManagerCreate(NULL,kIOHIDOptionsTypeNone);
     if(!_manager)return [self fail:@"Could not create touchscreen connection." code:4 error:error];
-    IOHIDManagerSetDeviceMatchingMultiple(_manager,(__bridge CFArrayRef)matching());
+#ifdef BT_UNIFIED_DRIVER
+    // Interface 0 is also a native Apple multitouch service on this tablet.
+    // Opening the entire composite device exclusively starves that service,
+    // yet none of its reports are consumed by this controller.
+    NSArray *ownedMatches=@[matching().firstObject];
+#else
+    NSArray *ownedMatches=matching();
+#endif
+    IOHIDManagerSetDeviceMatchingMultiple(_manager,(__bridge CFArrayRef)ownedMatches);
     CFSetRef devices=IOHIDManagerCopyDevices(_manager);IOHIDDeviceRef digitizer=NULL;NSUInteger digitizers=0;BOOL unexpected=NO;
     for(id object in (__bridge NSSet *)devices) {
         IOHIDDeviceRef device=(__bridge IOHIDDeviceRef)object;
@@ -276,8 +324,57 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(event.phase==BTGesturePhaseCancelled)_cancelEvents++;
     return YES;
 }
+#ifdef BT_UNIFIED_DRIVER
+@synthesize gestureActions=_gestureActions;
+- (void)setGestureActions:(NSDictionary *)actions {
+    NSMutableDictionary *checked=[NSMutableDictionary dictionary];
+    if([actions isKindOfClass:NSDictionary.class]) {
+        for(NSString *key in @[@"swipe",@"pinch"]){
+            id value=actions[key];
+            if([value isEqual:@"off"] || [value isEqual:@"shortcut"])checked[key]=[value copy];
+            else checked[key]=UPValidatedShortcut(value);
+        }
+    }
+    _gestureActions=[checked copy];
+}
+- (id)actionForGesture:(BTGestureEvent)event {
+    if(event.kind==BTGestureScroll)return self.gestureActions[@"swipe"];
+    if(event.kind==BTGestureMagnify)return self.gestureActions[@"pinch"];
+    return nil;
+}
+- (BOOL)consumeGestureOverride:(BTGestureEvent)event {
+    if(event.kind!=BTGestureScroll && event.kind!=BTGestureMagnify)return NO;
+    if(event.phase==BTGesturePhaseBegan){
+        _activeGestureAction=[self actionForGesture:event];
+        if(UPShortcutCaptureActive())_gestureShortcutConsumed=YES;
+    }
+    if(event.phase==BTGesturePhaseChanged && !_gestureShortcutConsumed){
+        // A resumed native gesture is fine after a gap; a held contact sequence
+        // must not play a new shortcut until report 4 confirms a lift.
+        _gestureShortcutConsumed=YES;
+        if(_postEvents && !UPShortcutCaptureActive() && [_activeGestureAction isKindOfClass:NSDictionary.class]){
+            NSDictionary *binding=_activeGestureAction;
+            UPBatch keys={0};
+            if(UPShortcutEvents([binding[@"key"] unsignedShortValue],[binding[@"modifiers"] unsignedLongLongValue],&keys)){
+                for(size_t i=0;i<keys.count;i++)CGEventPost(kCGHIDEventTap,keys.events[i]);
+                UPClear(&keys);
+            } else os_log_error(OS_LOG_DEFAULT,"BostoTablet: could not construct touch gesture shortcut.");
+        }
+    }
+    BOOL overridden=_activeGestureAction!=nil;
+    if(event.phase==BTGesturePhaseEnded || event.phase==BTGesturePhaseCancelled)_activeGestureAction=nil;
+    return overridden;
+}
+#endif
 - (BOOL)dispatchBatch:(BTGestureBatch)batch valid:(BOOL)valid {
     for(size_t i=0;i<batch.count;i++) {
+#ifdef BT_UNIFIED_DRIVER
+        // The anchor routes only native gestures. Remapped or Off gestures
+        // should not move the pointer or target another window.
+        if(batch.events[i].kind==BTGesturePointerMove && i+1<batch.count &&
+            batch.events[i+1].phase==BTGesturePhaseBegan && [self actionForGesture:batch.events[i+1]])continue;
+        if([self consumeGestureOverride:batch.events[i]])continue;
+#endif
         if(![self emit:batch.events[i]]) {
             [self stop];self.status=@"Could not create gesture event; multitouch disabled.";return NO;
         }
@@ -285,19 +382,37 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(!valid){[self stop];self.status=@"Invalid gesture state; multitouch disabled.";return NO;}
     return YES;
 }
+- (BOOL)releaseHeldGesture {
+#ifdef BT_UNIFIED_DRIVER
+    _activeGestureAction=nil;
+#endif
+    // Policy can already be idle after a tap batch. Release actual output.
+    if(_heldEvent.phase==BTGesturePhaseNone)return YES;
+    BTGestureEvent terminal=_heldEvent;terminal.phase=BTGesturePhaseCancelled;
+    terminal.deltaX=terminal.deltaY=terminal.magnification=0;
+    if(terminal.kind==BTGesturePointerDown || terminal.kind==BTGesturePointerDrag)terminal.kind=BTGesturePointerUp;
+    return [self emit:terminal];
+}
 - (void)cancelGesture {
     BTGestureBatch batch={0};BTGestureCancel(&_gestures,&batch);
-    // Policy can already be idle after producing a tap batch. Release the output
-    // actually dispatched, including when construction failed halfway through it.
-    if(_heldEvent.phase!=BTGesturePhaseNone) {
-        BTGestureEvent terminal=_heldEvent;terminal.phase=BTGesturePhaseCancelled;
-        terminal.deltaX=terminal.deltaY=terminal.magnification=0;
-        if(terminal.kind==BTGesturePointerDown || terminal.kind==BTGesturePointerDrag)terminal.kind=BTGesturePointerUp;
-        (void)[self emit:terminal];
-    }
+    (void)[self releaseHeldGesture];
 }
+#ifdef BT_UNIFIED_DRIVER
+@synthesize flipTouchY=_flipTouchY;
+- (void)setFlipTouchY:(BOOL)flipTouchY {
+    if(_flipTouchY==flipTouchY)return;
+    if(self.running){
+        // If release cannot be constructed, keep the current mapping and
+        // gesture so the real lift can finish it. Do not interrupt the pen.
+        if(![self releaseHeldGesture])return;
+        BTGestureBatch batch={0};BTGestureCancel(&_gestures,&batch);
+        [self updateStatus];
+    }
+    _flipTouchY=flipTouchY;
+}
+#endif
 - (void)updateStatus {
-    if(_gestures.pen==BTPenUnknown){self.status=_penMonitor.status;return;}
+    if(BTGestureGetReadiness(&_gestures,now())==BTGestureReadinessUnknown){self.status=_penMonitor.status;return;}
     if(_gestures.pen==BTPenInRange){self.status=@"Pen in range — touch suppressed.";return;}
     double remaining=_gestures.penOutSeen?_gestures.config.resumeDelay-(now()-_gestures.penOutAt):0;
     if(remaining>0){self.status=[NSString stringWithFormat:@"Pen left — touch resumes in %.1f seconds. Lift resting fingers.",remaining];return;}
@@ -320,8 +435,19 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     _reports++;BTTouchFrame frame={0};
     if(result!=kIOReturnSuccess || length<=0 || !bytes || bytes[0]!=reportID || !BTParseTouchReport(bytes,(size_t)length,&frame)){_invalid++;return;}
     _valid++;
+    _peakContacts=MAX(_peakContacts,frame.count);
+    if(frame.count>=2)_multiContactFrames++;
     double time=now();
-    if(reportID==4 && frame.count)_report4Seen=YES;
+    if(reportID==4) {
+        if(frame.count)_report4Seen=YES;
+        // A live contact or its release may have trailing duplicates. Idle
+        // empty report 4 packets must not keep the fallback locked out.
+        if(frame.count || _activeReportID==4)_report4PreferredUntil=time+0.5;
+    } else {
+        if(!frame.count)_vendorNeedsLift=NO;
+        else if(_activeReportID==4 || (!_activeReportID && time<_report4PreferredUntil))_vendorNeedsLift=YES;
+        if(_vendorNeedsLift)return;
+    }
     if(_activeReportID==3 && reportID==4 && frame.count>1) {
         // Report3 cannot represent multiple contacts. Promote only for that
         // evidence; a duplicate one-contact report must not interrupt a drag.
@@ -332,23 +458,28 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
             BOOL valid=BTGestureHandleTouch(&_gestures,(BTGestureTouchInput){.bounds=_bounds,.time=time},&cleared);
             if(![self dispatchBatch:cleared valid:valid])return;
         }
+        _vendorNeedsLift=YES;
         _activeReportID=4;
     }
     if(!_activeReportID) {
-        if(reportID==3 && _report4Seen)return;
         if(frame.count)_activeReportID=reportID;
     }
     if(_activeReportID && reportID!=_activeReportID)return;
+#ifdef BT_UNIFIED_DRIVER
+    if(reportID==4 && !frame.count)_gestureShortcutConsumed=NO;
+    if(self.flipTouchY) {
+        for(size_t i=0;i<frame.count;i++)
+            frame.contacts[i].y=(uint16_t)(BT_TOUCH_Y_MAX-MIN(frame.contacts[i].y,BT_TOUCH_Y_MAX));
+    }
+#endif
     _contacts=frame.count;_lastFrameAt=time;
     BTGestureBatch batch={0};
     BOOL valid=BTGestureHandleTouch(&_gestures,(BTGestureTouchInput){frame,_bounds,time},&batch);
     if(![self dispatchBatch:batch valid:valid])return;
-    if(!frame.count){
-        _activeReportID=0;
+    if(!frame.count)_activeReportID=0;
 #ifdef BT_UNIFIED_DRIVER
-        _touchReportExpired=NO;
+    if(!frame.count || (frame.count==2 && _gestures.mode==BTGestureTwoPending))_touchReportExpired=NO;
 #endif
-    }
     [self updateStatus];
 }
 - (void)tick:(NSTimer *)timer {
@@ -367,11 +498,11 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 #ifdef BT_UNIFIED_DRIVER
         if(!_touchReportExpired) {
             _touchReportExpired=YES;
-            [self cancelGesture];
-            if(_heldEvent.phase!=BTGesturePhaseNone){[self stop];self.status=@"Could not cancel silent touch stream; disabled.";return;}
+            BTGestureBatch cancelled={0};BTGestureCancelForReportGap(&_gestures,time,&cancelled);
+            if(![self releaseHeldGesture]){[self stop];self.status=@"Could not cancel silent touch stream; disabled.";return;}
         }
-        // Retain the active report stream and blocked contacts until its real
-        // no-contact frame. Silence must neither rearm a gesture nor close HID.
+        // A lone contact still requires lift. A real pair can rebaseline motion
+        // without reopening HID or replaying click/drag output.
 #else
         [self stop];
         self.status=@"Touch report timeout; disabled. Press Enable to retry.";
@@ -425,7 +556,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
 - (NSDictionary *)snapshot {
     return @{@"running":@(self.running),@"status":self.status?:@"",@"displayID":@(_display),@"interfaces":@(_devices),
              @"reports":@(_reports),@"rawReports":@(_rawReports),@"rawReportIDs":[_rawReportIDs copy]?:@{},@"activeReportID":@(_activeReportID),
-             @"validFrames":@(_valid),@"invalidFrames":@(_invalid),@"activeContacts":@(_contacts),
+             @"validFrames":@(_valid),@"invalidFrames":@(_invalid),@"activeContacts":@(_contacts),@"peakContacts":@(_peakContacts),@"multiContactFrames":@(_multiContactFrames),
              @"firmwareReport":@[@(_firmware[0]),@(_firmware[1]),@(_firmware[2])],@"configurationWrites":@(_configurationWrites),@"touchConfigurationAccepted":@(_touchConfigurationAccepted),
              @"pointerDown":@(_heldEvent.phase!=BTGesturePhaseNone && (_heldEvent.kind==BTGesturePointerDown || _heldEvent.kind==BTGesturePointerDrag)),
              @"downEvents":@(_downs),@"dragEvents":@(_drags),@"upEvents":@(_ups),@"scrollEvents":@(_scrollEvents),@"magnifyEvents":@(_magnifyEvents),@"cancelEvents":@(_cancelEvents),

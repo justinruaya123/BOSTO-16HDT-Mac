@@ -16,3 +16,7 @@ typedef struct { bool known,invert; uint8_t held; } UPButtonState;
 uint8_t UPButtonPresses(UPButtonState *state,UPPacket packet,bool capturing);
 bool UPShortcutValid(uint16_t key,CGEventFlags modifiers);
 bool UPShortcutEvents(uint16_t key,CGEventFlags modifiers,UPBatch *batch);
+NSDictionary *UPValidatedShortcut(id value);
+// Pen and touch shortcut handling is owned by the main run loop.
+void UPSetShortcutCapture(bool capturing);
+bool UPShortcutCaptureActive(void);
