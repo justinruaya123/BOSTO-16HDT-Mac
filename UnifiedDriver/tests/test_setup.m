@@ -33,25 +33,25 @@ int main(void) { @autoreleasepool {
     assert(granted && [trace isEqual:@"check;"]);
     // An open, ignored/raw reports, and retained old counters cannot imply Active.
     NSMutableDictionary *state=[@{@"running":@NO,@"validFrames":@12,@"penObserver":@{@"running":@NO,@"reports":@8,@"pressureState":@"inactive"}} mutableCopy];
-    NSDictionary *s=UPSetupStatus(state,NO,YES);
-    assert([s[@"pen"] isEqual:@"Off"] && [s[@"touch"] isEqual:@"Off"]);
+    NSDictionary *s=UPSetupStatus(state,NO,YES,NO);
+    assert([s[@"pen"] isEqual:@"Driver inactive"] && [s[@"touch"] isEqual:@"Driver inactive"]);
     assert([s[@"listen"] isEqual:@"Not granted"] && [s[@"post"] isEqual:@"Granted"]);
     state[@"running"]=@YES;state[@"validFrames"]=@0;state[@"rawReports"]=@20;
     state[@"penObserver"]=@{@"running":@YES,@"reports":@0,@"seized":@YES,@"pressureState":@"noData",@"presence":@"unknown"};
-    s=UPSetupStatus(state,YES,YES);
+    s=UPSetupStatus(state,YES,YES,NO);
     assert([s[@"pen"] isEqual:@"Waiting for reports"] && [s[@"touch"] isEqual:@"Waiting for reports"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@1,@"pressureState":@"tipUp",@"presence":@"inRange"};
-    state[@"gestureReadiness"]=@(BTGestureReadinessPen);state[@"validFrames"]=@1;s=UPSetupStatus(state,YES,YES);
+    state[@"gestureReadiness"]=@(BTGestureReadinessPen);state[@"validFrames"]=@1;s=UPSetupStatus(state,YES,YES,NO);
     assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active — palm suppression"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@0,@"pressureState":@"noData"};
-    s=UPSetupStatus(state,YES,YES);assert([s[@"pen"] isEqual:@"Waiting for reports"]);
-    state[@"running"]=@NO;s=UPSetupStatus(state,YES,YES);
-    assert([s[@"pen"] isEqual:@"Off"] && [s[@"touch"] isEqual:@"Off"]);
+    s=UPSetupStatus(state,YES,YES,NO);assert([s[@"pen"] isEqual:@"Waiting for reports"]);
+    state[@"running"]=@NO;s=UPSetupStatus(state,YES,YES,NO);
+    assert([s[@"pen"] isEqual:@"Driver inactive"] && [s[@"touch"] isEqual:@"Driver inactive"]);
     state[@"running"]=@YES;state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange"};
     state[@"gestureReadiness"]=@(BTGestureReadinessReady);
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
     state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange",@"reports":@1,@"pressureState":@"outOfRange"};
-    s=UPSetupStatus(state,YES,YES);
+    s=UPSetupStatus(state,YES,YES,NO);
     assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active"]);
     // Readiness, not recent contact/report activity, determines the ready menu.
     state[@"validFrames"]=@0;state[@"activeContacts"]=@999;
@@ -69,5 +69,23 @@ int main(void) { @autoreleasepool {
     state[@"gestureReadiness"]=@(BTGestureReadinessUnknown);
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
     state[@"running"]=@NO;assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuUnavailable);
+    // Accepted reports and palm telemetry are not evidence of output from a muted input.
+    state[@"running"]=@YES;state[@"validFrames"]=@9;
+    state[@"penObserver"]=@{@"running":@YES,@"reports":@8,@"pressureState":@"tipDown",@"seized":@YES};
+    state[@"gestureReadiness"]=@(BTGestureReadinessReady);
+    state[@"touchInputEnabled"]=@NO;state[@"penInputEnabled"]=@YES;
+    s=UPSetupStatus(state,YES,YES,NO);
+    assert([s[@"touch"] isEqual:@"Muted by driver"] && [s[@"pen"] isEqual:@"Active"]);
+    assert(UPSetupMenuState(state,YES,YES,NO)!=UPMenuTouch);
+    state[@"penInputEnabled"]=@NO;state[@"gestureReadiness"]=@(BTGestureReadinessPen);
+    s=UPSetupStatus(state,YES,YES,NO);
+    assert([s[@"pen"] isEqual:@"Muted by driver"] && [s[@"touch"] isEqual:@"Muted by driver"]);
+    assert(UPSetupMenuState(state,YES,YES,NO)!=UPMenuPen);
+    state[@"touchInputEnabled"]=@YES;state[@"gestureReadiness"]=@(BTGestureReadinessReady);
+    assert([UPSetupStatus(state,YES,YES,NO)[@"touch"] isEqual:@"Active"]);
+    for(NSDictionary *blocked in @[UPSetupStatus(state,NO,YES,NO),UPSetupStatus(state,YES,NO,NO)])
+        assert(![blocked[@"pen"] isEqual:@"Muted by driver"] && ![blocked[@"touch"] isEqual:@"Active"]);
+    state[@"running"]=@NO;
+    assert(![UPSetupStatus(state,YES,YES,NO)[@"pen"] isEqual:@"Muted by driver"]);
     puts("Setup status and one-per-click permission routing checks passed (offline).");
 }return 0;}

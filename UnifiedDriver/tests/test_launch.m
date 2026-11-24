@@ -65,16 +65,32 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 @property(nonatomic) BOOL running;
 @property(nonatomic) NSUInteger attempts;
 @property(nonatomic) CGDirectDisplayID startedDisplay;
-@property(nonatomic) BOOL flipTouchY;
+@property(nonatomic) BOOL flipTouchY,touchInputEnabled,penInputEnabled,cleaning;
+@property(nonatomic,copy) NSDictionary *gestureActions;
 @end
 @implementation TestTouchSession
 - (BOOL)updateResumeDelay:(double)seconds { assert(seconds==2); return YES; }
 - (BOOL)startWithDisplay:(CGDirectDisplayID)display postEvents:(BOOL)postEvents error:(NSError **)error {
-    (void)error; assert(postEvents); self.attempts++;
+    (void)error; assert(postEvents); assert(!self.cleaning && "Started before HID cleanup"); self.attempts++;
     if(!tabletIdentity)return NO;
     self.startedDisplay=display;self.running=YES;return YES;
 }
-- (void)stop { self.running=NO; }
+- (void)stop { self.running=NO; } // Most launch tests do not interleave events with cleanup.
+@end
+@interface DeferredTouchSession : TestTouchSession
+@end
+@implementation DeferredTouchSession
+- (void)stop {
+    if(!self.running)return;
+    [super stop];self.cleaning=YES;
+    dispatch_async(dispatch_get_main_queue(),^{self.cleaning=NO;});
+}
+- (NSDictionary *)snapshot {
+    return @{@"running":@(self.running),@"penObserver":@{@"running":@(self.running),@"seized":@(self.running)}};
+}
+- (NSString *)status { return @"Waiting for reports"; }
+- (void)setTouchInputEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setTouchInputEnabled:value]; }
+- (void)setPenInputEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setPenInputEnabled:value]; }
 @end
 
 @interface TestApp : UPApp
@@ -82,6 +98,14 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 @implementation TestApp
 - (void)refresh:(NSTimer *)timer { (void)timer; }
 - (void)openPermissionSettings:(NSString *)pane { (void)pane; assert(0 && "Automatic launch opened System Settings"); }
+@end
+
+// Exercise Home's real refresh without looking up the machine's login service.
+@interface HomeApp : UPApp
+@end
+@implementation HomeApp
+- (void)refreshLoginStatus {}
+- (void)openPermissionSettings:(NSString *)pane { (void)pane; assert(0 && "Switches opened Settings"); }
 @end
 
 @interface TestPreferences : NSObject
@@ -142,9 +166,76 @@ static TestApp *launchWithSettings(NSArray<NSDictionary *> *displays, NSDictiona
 }
 static TestApp *launch(NSArray<NSDictionary *> *displays) { return launchWithSettings(displays,@{}); }
 
+static NSButton *homeButton(NSView *view,NSString *title) {
+    if([view isKindOfClass:NSButton.class] && [[(NSButton *)view title] isEqual:title])return (NSButton *)view;
+    for(NSView *child in view.subviews){NSButton *button=homeButton(child,title);if(button)return button;}
+    return nil;
+}
+static void setSwitch(NSButton *button,BOOL on) {
+    button.state=on?NSControlStateValueOn:NSControlStateValueOff;
+    assert([button sendAction:button.action to:button.target]);
+}
+static void drainMainQueue(void) {
+    __block BOOL done=NO;dispatch_async(dispatch_get_main_queue(),^{done=YES;});
+    while(!done)[NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.001]];
+}
+static void checkInputSwitches(NSDictionary *bosto) {
+    connectedDisplays=@[bosto];tabletIdentity=@[@101,@201];listenGranted=postGranted=YES;
+    TestPreferences *prefs=[TestPreferences new];prefs.values=[NSMutableDictionary dictionary];
+    for(int launch=0;launch<2;launch++){
+        HomeApp *app=[HomeApp new];app.preferences=(NSUserDefaults *)(id)prefs;app.exponent=1;
+        DeferredTouchSession *session=[DeferredTouchSession new];app.touch=(BTTouchController *)(id)session;
+        NSView *root=[[NSView alloc]initWithFrame:NSMakeRect(0,0,700,550)];
+        [app composeControlsInView:root resumeDelay:2];[app reloadDisplays:nil];[app preselectLaunchDisplay];
+        NSTabView *tabs=(NSTabView *)root.subviews.firstObject;
+        NSView *home=[tabs tabViewItemAtIndex:[tabs indexOfTabViewItemWithIdentifier:@"home"]].view;
+        NSButton *touch=homeButton(home,@"Touch input"),*pen=homeButton(home,@"Pen input");
+        assert(touch && pen && "Home must offer independent display touch and pen switches");
+        assert(touch.state==(launch?NSControlStateValueOff:NSControlStateValueOn) && pen.state==NSControlStateValueOn);
+        assert(session.running && session.touchInputEnabled==!launch && session.penInputEnabled);
+        assert([app.enable.title isEqual:@"Stop driver (release tablet)"]);
+        if(!launch){
+            setSwitch(touch,NO);[app reconcileInput];
+            assert(!session.running && session.cleaning && session.attempts==1);
+            assert(![app.setupLabels[1].stringValue containsString:@"Muted"]);
+            drainMainQueue();[app reconcileInput];
+            assert([app.setupLabels[1].stringValue isEqual:@"Muted by driver"]);
+            assert(session.running && !session.touchInputEnabled && session.penInputEnabled && session.attempts==2);
+            [app.touch stop];drainMainQueue();continue;
+        }
+        setSwitch(pen,NO);setSwitch(touch,YES);setSwitch(touch,NO); // Latest pair wins during cleanup.
+        drainMainQueue();[app reconcileInput];
+        assert(session.running && !session.touchInputEnabled && !session.penInputEnabled && session.attempts==2);
+        assert([app.setupLabels[0].stringValue isEqual:@"Muted by driver"] && [app.setupLabels[1].stringValue isEqual:@"Muted by driver"]);
+        postGranted=NO;[app refresh:nil];
+        assert(![app.setupLabels[0].stringValue containsString:@"Muted"]);
+        postGranted=YES;app.failure=@"Session fault";[app refresh:nil];
+        assert(![app.setupLabels[0].stringValue containsString:@"Muted"]);app.failure=nil;
+        setSwitch(pen,YES);tabletIdentity=nil;drainMainQueue();[app reconcileInput];
+        assert(!session.running && session.attempts==2); // USB detached before cleanup returned.
+        tabletIdentity=@[@102,@202];[app reconcileInput];assert(session.running && session.attempts==3);
+        setSwitch(touch,YES);connectedDisplays=@[];drainMainQueue();[app reconcileInput];
+        assert(!session.running && session.attempts==3); // USB still attached, screen notification not yet delivered.
+        connectedDisplays=@[bosto];[app reconcileInput];assert(session.running && session.attempts==4);
+        setSwitch(touch,NO);[app toggle:nil]; // Master Stop during a switch must cancel the pending restart.
+        drainMainQueue();[app reconcileInput];assert(!session.running && session.attempts==4);
+        assert([app.enable.title isEqual:@"Start driver"]);
+        setSwitch(pen,NO);drainMainQueue();[app reconcileInput];assert(!session.running && session.attempts==4);
+        [app toggle:nil];assert(session.running && !session.touchInputEnabled && !session.penInputEnabled);
+        [session stop]; // A controller fault queued cleanup; same identity must not loop on the same choice.
+        [app reconcileInput];assert(session.attempts==5);
+        setSwitch(touch,YES);[app reconcileInput];assert(session.cleaning && session.attempts==5);
+        drainMainQueue();[app reconcileInput];
+        assert(session.running && session.touchInputEnabled && !session.penInputEnabled && session.attempts==6);
+        [app disable:nil];drainMainQueue();
+    }
+    puts("Home switches persist independently; restart waits for cleanup, a connected tablet and driver consent (offline).");
+}
+
 int main(void) { @autoreleasepool {
     checkGesturePreferences();
     NSDictionary *bosto=@{@"id":@42,@"uuid":@"tablet",@"name":@"Bosto Tablet",@"mirrored":@NO};
+    checkInputSwitches(bosto);
     NSDictionary *retina=@{@"id":@1,@"uuid":@"internal",@"name":@"Built-in Retina Display",@"mirrored":@NO};
     listenGranted=postGranted=YES;
     tabletIdentity=nil;

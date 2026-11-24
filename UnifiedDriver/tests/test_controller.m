@@ -183,6 +183,66 @@ static void checkBooleanShortcutPreferencesFallBackToNative(BTTouchController *c
     }
     [controller stop];drainMain();chooseActions(controller,@{});
 }
+static void checkInputModes(BTTouchController *controller){
+    assert(controller.touchInputEnabled && controller.penInputEnabled);
+    for(int touch=0;touch<2;touch++)for(int pen=0;pen<2;pen++){
+        resetFakes();controller.touchInputEnabled=touch;controller.penInputEnabled=pen;
+        chooseActions(controller,@{@"swipe":@{@"key":@6,@"modifiers":@0}});
+        assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+        NSSet *expected=touch?[NSSet setWithObject:testDigitizer()]:[NSSet setWithObjects:testDigitizer(),testCompanion(),nil];
+        assert(boundaryViolations==0 && touchOpenAttempts.count==expected.count && [[NSSet setWithArray:touchOpenAttempts] isEqual:expected]);
+        assert([penModeAtOpen isEqual:@((BOOL)pen)] && penOpenCalls==1);
+        assert(featureReads==touch && featureWrites==touch && (!touch || writtenDevice==(__bridge IOHIDDeviceRef)testDigitizer()));
+        sendFakePen(BTPenInRange);
+        if(!touch){
+            // There is no live report subscription; drive the same callback anyway
+            // to verify even a queued tap, swipe or pinch cannot escape the mute.
+            assert(!reportCallback);reportCallback=received;reportContext=(__bridge void *)controller;
+        }
+        tapAtY(2000,4);sendFakeTouches(2,4000,8000);sendFakeTouches(2,4500,8500);sendFakeTouches(0,0,0);
+        sendFakeTouches(2,4000,8000);sendFakeTouches(2,3500,8500);sendFakeTouches(0,0,0);
+        [controller tick:nil];assert(controller.running);
+        if(touch && !pen)assert(postedDowns==1 && postedUps==1 && postedEvents[3].type==NSEventTypeKeyUp && postedEvents.lastObject.type==NSEventTypeMagnify);
+        else assert(symbolicPosts==0);
+        [controller stop];drainMain();assert([[NSSet setWithArray:touchClosed] isEqual:expected]);
+    }
+    chooseActions(controller,@{});
+}
+static void checkInvalidTouchSelection(BTTouchController *controller){
+    CFSetRef saved=fakeDevices;
+    for(int variant=0;variant<11;variant++){
+        resetFakes();controller.touchInputEnabled=NO;
+        NSMutableDictionary *digitizer=[testDigitizer() mutableCopy],*mouse=[testCompanion() mutableCopy];
+        NSMutableSet *inventory=[NSMutableSet set];
+        switch(variant){
+            case 0: break; // missing companion
+            case 1: parents[@22]=@32;usbNodes[@32]=usbNodes[@31];break; // other physical device, even with cloned location
+            case 2: mouse[@kIOHIDLocationIDKey]=@42;break;
+            case 3: [mouse removeObjectForKey:@kIOHIDLocationIDKey];break;
+            case 4: mouse[@kIOHIDTransportKey]=@"Bluetooth";break;
+            case 5: [parents removeObjectForKey:@21];break;
+            case 6: usbNodes[@31]=@{@"idVendor":@1,@"idProduct":@1,@"locationID":@0x12340000};break;
+            case 7: {NSMutableDictionary *extra=[mouse mutableCopy];extra[@"service"]=@13;[inventory addObject:extra];break;}
+            case 8: {NSMutableDictionary *extra=[digitizer mutableCopy];extra[@"service"]=@13;[inventory addObject:extra];controller.touchInputEnabled=YES;break;}
+            case 9: digitizer[@kIOHIDTransportKey]=@"Virtual";controller.touchInputEnabled=YES;break;
+            case 10: usbInterfaces[@22]=@{@"bInterfaceNumber":@5};break; // unrelated mouse function on the composite device
+
+        }
+        [inventory addObject:digitizer];if(variant)[inventory addObject:mouse];
+        fakeDevices=(__bridge_retained CFSetRef)inventory;NSError *error=nil;
+        assert(![controller startWithDisplay:42 postEvents:YES error:&error] && error && !controller.running);
+        drainMain();assert(!openCalls && !penOpenCalls && !featureWrites && !symbolicPosts);
+        CFRelease(fakeDevices);
+    }
+    fakeDevices=saved;resetFakes();controller.touchInputEnabled=NO;failTouchOpenService=12;
+    assert(![controller startWithDisplay:42 postEvents:YES error:NULL]);drainMain();
+    assert(!controller.running && !featureWrites && !symbolicPosts && [touchClosed containsObject:testDigitizer()]);
+    resetFakes();assert([controller startWithDisplay:42 postEvents:YES error:NULL]);
+    unpluggedDevice=(__bridge IOHIDDeviceRef)testCompanion();
+    touchRemoved(touchRemovedContext,0,(__bridge void *)testCompanion());
+    drainMain();assert(!controller.running && touchClosed.count==2 && !symbolicPosts);
+    controller.touchInputEnabled=YES;controller.penInputEnabled=YES;
+}
 int main(void) { @autoreleasepool {
     createFakeDevices();resetFakes();
     BTTouchController *controller=[BTTouchController new];NSError *error=nil;
@@ -190,6 +250,8 @@ int main(void) { @autoreleasepool {
     assert([controller.snapshot[@"interfaces"] unsignedIntValue]==1 && "Exclusive open must leave the native gesture companion to macOS");
     assert(boundaryViolations==0 && writtenDevice && property(writtenDevice,kIOHIDPrimaryUsagePageKey)==13);
     [controller stop];drainMain();
+    checkInputModes(controller);checkInvalidTouchSelection(controller);
+    puts("All four input modes, exact pinned claims, USB pairing rejection and partial-open cleanup passed.");
     checkVerticalOrientation(controller);checkTouchReportRecovery(controller);checkPassivePairRecovery(controller);checkGestureActions(controller);
     checkShortcutDoesNotReplayAcrossGap(controller);checkBooleanShortcutPreferencesFallBackToNative(controller);
     puts("No shortcut replay across a report gap; Boolean preferences retain native output.");resetFakes();
@@ -253,7 +315,7 @@ int main(void) { @autoreleasepool {
     assert(!controller.running && closeCalls==1 && penCloseCalls==1 && postedUps==1);
     [controller stop];drainMain();
     resetFakes();assert([controller startWithDisplay:42 postEvents:YES error:NULL]);pressFakeFinger();
-    removedCallback(removedContext,0,NULL,(__bridge IOHIDDeviceRef)testDigitizer());
+    touchRemoved(touchRemovedContext,0,(__bridge void *)testDigitizer());
     assert(!controller.running && closeCalls==0 && postedUps==0);
     NSString *reason=controller.status;assert(![controller startWithDisplay:42 postEvents:YES error:NULL]);
     int oldPosts=symbolicPosts;pressFakeFinger();assert(symbolicPosts==oldPosts);

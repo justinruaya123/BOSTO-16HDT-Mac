@@ -22,13 +22,16 @@ static uint32_t number(IOHIDDeviceRef d,CFStringRef key) {
     return (uint32_t)n;
 }
 static BOOL exact(IOHIDDeviceRef d) {
-    return d && number(d,CFSTR(kIOHIDVendorIDKey))==0xed1 && number(d,CFSTR(kIOHIDProductIDKey))==0x7821 && number(d,CFSTR(kIOHIDPrimaryUsagePageKey))==13 && number(d,CFSTR(kIOHIDPrimaryUsageKey))==2;
+    if(!d)return NO;
+    CFTypeRef transport=IOHIDDeviceGetProperty(d,CFSTR(kIOHIDTransportKey));
+    uint32_t location=number(d,CFSTR(kIOHIDLocationIDKey));
+    return transport && CFEqual(transport,CFSTR("USB")) && location!=0 && location!=UINT32_MAX && number(d,CFSTR(kIOHIDVendorIDKey))==0xed1 && number(d,CFSTR(kIOHIDProductIDKey))==0x7821 && number(d,CFSTR(kIOHIDPrimaryUsagePageKey))==13 && number(d,CFSTR(kIOHIDPrimaryUsageKey))==2;
 }
 @interface BTPenMonitor () {
     IOHIDManagerRef _manager;
     IOHIDDeviceRef _device;
     CFRunLoopRef _loop;
-    BOOL _openAttempted,_stopping;
+    BOOL _openAttempted,_stopping,_penInputEnabled;
     uint8_t _buffer[8];
     UPState _state;
     UPButtonState _buttons;
@@ -65,7 +68,19 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
 + (void)updatePressureExponent:(double)exponent {pressureExponent=UPValidatedExponent(@(exponent));}
 + (void)updateShortcutBindings:(NSArray *)bindings {shortcutBindings=UPValidatedBindings(bindings);}
 + (void)setShortcutCapture:(BOOL)capturing {UPSetShortcutCapture(capturing);}
-- (instancetype)init {if((self=[super init])){_presence=BTPenUnknown;_status=@"Disabled";}return self;}
+- (instancetype)init {if((self=[super init])){_penInputEnabled=YES;_presence=BTPenUnknown;_status=@"Disabled";}return self;}
+- (BOOL)penInputEnabled {return _penInputEnabled;}
+- (void)setPenInputEnabled:(BOOL)enabled {
+    if(_penInputEnabled==enabled)return;
+    _penInputEnabled=enabled;
+    if(!self.running)return;
+    // End the old stroke before accepting input in a different mode. Do not
+    // replay a tip or barrel shortcut held across an in-session unmute.
+    if(!enabled)[self releasePenEvents];
+    _buttons=(UPButtonState){0};_hasPacket=NO;_effectivePressure=0;_awaitingTipRelease=enabled;
+    self.status=enabled?@"Waiting for the first pen report.":@"Pen input muted.";
+    [self publish:enabled?BTPenUnknown:BTPenOutOfRange];
+}
 - (void)dealloc {[self cleanup];}
 - (void)publish:(BTPenPresence)p {self.presence=p;if(self.presenceChanged)self.presenceChanged(p);}
 - (void)post:(UPBatch *)batch {
@@ -95,9 +110,9 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     if(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)!=kIOHIDAccessTypeGranted || !CGPreflightPostEventAccess())return [self fail:@"Input Monitoring and Accessibility required; grant access then Enable again." error:error];
     if(!selectedDisplay || !CGDisplayIsActive(selectedDisplay) || !isfinite(pressureExponent) || pressureExponent<0.25 || pressureExponent>4)return [self fail:@"Select an active display and a pressure exponent from 0.25 to 4." error:error];
     _bounds=CGDisplayBounds(selectedDisplay);
-    _manager=IOHIDManagerCreate(NULL,kIOHIDOptionsTypeNone);
+    _manager=IOHIDManagerCreate(NULL,kIOHIDManagerOptionIndependentDevices);
     if(!_manager)return [self fail:@"Could not create pen discovery manager." error:error];
-    NSDictionary *match=@{@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2};
+    NSDictionary *match=@{@kIOHIDTransportKey:@"USB",@kIOHIDVendorIDKey:@0xed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2};
     IOHIDManagerSetDeviceMatching(_manager,(__bridge CFDictionaryRef)match);
     CFSetRef devices=IOHIDManagerCopyDevices(_manager);
     if(!devices || CFSetGetCount(devices)!=1){if(devices)CFRelease(devices);return [self fail:@"Expected exactly one 0ED1:7821 pen, digitizer 13:2. Legacy 782C unsupported." error:error];}
@@ -115,22 +130,22 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     IOHIDDeviceRegisterRemovalCallback(_device,deviceGone,(__bridge void *)self);
     IOHIDDeviceRegisterInputReportCallback(_device,_buffer,sizeof _buffer,input,(__bridge void *)self);
     IOHIDDeviceScheduleWithRunLoop(_device,_loop,kCFRunLoopCommonModes);
-    self.running=YES;self.status=@"Waiting for the first pen report.";
-    [self publish:BTPenUnknown];
+    self.running=YES;self.status=_penInputEnabled?@"Waiting for the first pen report.":@"Pen input muted.";
+    [self publish:_penInputEnabled?BTPenUnknown:BTPenOutOfRange];
     self.timer=[NSTimer timerWithTimeInterval:0.05 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [NSRunLoop.currentRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];return YES;
 }
 - (void)report:(uint8_t *)bytes length:(CFIndex)n reportID:(uint32_t)rid result:(IOReturn)result {
     if(!self.running)return;
     if(result!=kIOReturnSuccess){[self abort:@"Pen report transport failed; disabled."];return;}
-    if(rid!=1){_ignored++;return;}
+    if(!_penInputEnabled || rid!=1){_ignored++;return;}
     UPPacket packet={0};
     if(n!=8 || !UPParse(bytes,(size_t)n,&packet)){[self abort:@"Malformed exact pen report 1; disabled."];return;}
     _reports++;
     // Cancel touch before posting pen down/proximity. Both consume this report.
     self.status=packet.inRange?@"Pen in range — touch suppressed.":@"Pen exited — touch resume delay active.";
     [self publish:packet.inRange?BTPenInRange:BTPenOutOfRange];
-    if(!self.running)return;
+    if(!self.running || !_penInputEnabled)return;
     _lastValidReportAt=NSProcessInfo.processInfo.systemUptime;
     BOOL recovering=_awaitingTipRelease;
     if(recovering && packet.inRange && packet.tip) {
@@ -190,11 +205,15 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     // Restart is rejected while pending, so this block cannot target a new session.
     dispatch_async(dispatch_get_main_queue(),^{[self cleanup];});
 }
-- (void)cleanup {
+- (void)releasePenEvents {
+    _state.last.barrel=false;_state.last.secondary=false;
     UPBatch batch={0};UPCancel(&_state,&batch);
     // Only terminal releases may post during cleanup; normal posting is blocked.
     for(size_t i=0;i<batch.count;i++)CGEventPost(kCGHIDEventTap,batch.events[i]);
     UPClear(&batch);
+}
+- (void)cleanup {
+    [self releasePenEvents];
     if(_device){
         IOHIDDeviceRegisterRemovalCallback(_device,NULL,NULL);
         IOHIDDeviceRegisterInputReportCallback(_device,_buffer,sizeof _buffer,NULL,NULL);
@@ -214,7 +233,7 @@ static void added(void *ctx,IOReturn result,void *sender,IOHIDDeviceRef d) {
     // Only a property on the already acquired exact pen. Never probe reports.
     NSNumber *battery=self.running && _device?UPBatteryPercent((__bridge id)IOHIDDeviceGetProperty(_device,CFSTR("BatteryPercent"))):nil;
     return @{@"batteryPercent":battery?:NSNull.null,@"running":@(self.running),@"stopping":@(_stopping),@"presence":self.presence==BTPenInRange?@"inRange":self.presence==BTPenOutOfRange?@"outOfRange":@"unknown",@"status":self.status?:@"",@"reports":@(_reports),@"ignoredReports":@(_ignored),@"seized":@(_device && _openAttempted),@"configurationWrites":@0,@"tipDown":@(_state.down),@"pressureExponent":@(pressureExponent),
-        @"pressureState":!self.running?@"inactive":!_hasPacket?@"noData":!_acceptedPacket.inRange?@"outOfRange":_acceptedPacket.tip?@"tipDown":@"tipUp",
+        @"penInputEnabled":@(_penInputEnabled),@"pressureState":!self.running?@"inactive":!_penInputEnabled?@"muted":!_hasPacket?@"noData":!_acceptedPacket.inRange?@"outOfRange":_acceptedPacket.tip?@"tipDown":@"tipUp",
         @"rawPressure":@(self.running && _hasPacket && _acceptedPacket.inRange && _acceptedPacket.tip?_acceptedPacket.pressure:0),
         @"effectivePressure":@(self.running && _hasPacket?_effectivePressure:0),
         @"sideButtonPresses":@[@(_presses[0]),@(_presses[1])],@"shortcutPairs":@(_shortcuts),@"shortcutFailures":@(_shortcutFailures),@"shortcutCapture":@(UPShortcutCaptureActive()),@"heldTipReportTimeout":@2.0,@"heldTipTimeouts":@(_heldTipTimeouts),@"lastHeldTipTimeoutGap":@(_lastHeldTipTimeoutGap),@"lastValidReportUptime":@(_lastValidReportAt)};

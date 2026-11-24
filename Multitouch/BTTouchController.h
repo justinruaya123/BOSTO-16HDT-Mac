@@ -15,6 +15,8 @@ NSArray<NSNumber *> *BTTabletRegistryIdentity(void);
 - (BOOL)startWithDisplay:(CGDirectDisplayID)display postEvents:(BOOL)postEvents error:(NSError **)error;
 - (BOOL)updateResumeDelay:(double)seconds;
 #ifdef BT_UNIFIED_DRIVER
+// Main-thread settings for the next start. Changing an active claim requires stop/restart.
+@property(nonatomic) BOOL touchInputEnabled, penInputEnabled;
 @property(nonatomic) BOOL flipTouchY;
 // Missing keys use native output. Values are @"off", @"shortcut" (unassigned), or a key binding.
 @property(nonatomic,copy) NSDictionary<NSString *,id> *gestureActions;

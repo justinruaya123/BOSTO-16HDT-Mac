@@ -1,12 +1,16 @@
 #import "SetupState.h"
 #import "BTGestures.h"
 
+BOOL UPSetupControlsInput(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
+    return !fault && listenGranted && postGranted && [snapshot[@"running"] boolValue] && [snapshot[@"penObserver"][@"running"] boolValue];
+}
 UPMenuState UPSetupMenuState(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
-    if(fault || !listenGranted || !postGranted || ![snapshot[@"running"] boolValue] ||
-       ![snapshot[@"penObserver"][@"running"] boolValue])return UPMenuUnavailable;
+    if(!UPSetupControlsInput(snapshot,listenGranted,postGranted,fault))return UPMenuUnavailable;
+    BOOL touchEnabled=![snapshot[@"touchInputEnabled"] isEqual:@NO];
+    BOOL penEnabled=![snapshot[@"penInputEnabled"] isEqual:@NO];
     switch([snapshot[@"gestureReadiness"] unsignedIntegerValue]) {
-        case BTGestureReadinessPen:return UPMenuPen;
-        case BTGestureReadinessReady:return UPMenuTouch;
+        case BTGestureReadinessPen:return penEnabled?UPMenuPen:UPMenuUnavailable;
+        case BTGestureReadinessReady:return touchEnabled?UPMenuTouch:UPMenuUnavailable;
         case BTGestureReadinessUnknown:case BTGestureReadinessLiftRequired:return UPMenuUnavailable;
     }
     return UPMenuUnavailable;
@@ -24,21 +28,25 @@ BOOL UPRequestSetupPermission(BOOL (^preflight)(void), void (^request)(void), vo
     if(!granted)openSettings();
     return granted;
 }
-NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted) {
+NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
     BOOL running=[snapshot[@"running"] boolValue];
     NSDictionary *pen=snapshot[@"penObserver"];
-    BOOL penActive=running && [pen[@"running"] boolValue] && [pen[@"reports"] unsignedIntegerValue]>0 &&
+    BOOL controlling=UPSetupControlsInput(snapshot,listenGranted,postGranted,fault);
+    NSString *unavailable=!running?@"Driver inactive":@"Driver unavailable";
+    BOOL penMuted=controlling && [snapshot[@"penInputEnabled"] isEqual:@NO];
+    BOOL touchMuted=controlling && [snapshot[@"touchInputEnabled"] isEqual:@NO];
+    BOOL penActive=controlling && !penMuted && [pen[@"reports"] unsignedIntegerValue]>0 &&
         ![pen[@"pressureState"] isEqual:@"noData"] && ![pen[@"pressureState"] isEqual:@"inactive"];
-    BOOL touchActive=running && [snapshot[@"validFrames"] unsignedIntegerValue]>0;
-    NSString *penText=!running?@"Off":penActive?@"Active":@"Waiting for reports";
-    NSString *touchText=!running?@"Off":touchActive?@"Active":@"Waiting for reports";
+    BOOL touchActive=controlling && !touchMuted && [snapshot[@"validFrames"] unsignedIntegerValue]>0;
+    NSString *penText=!controlling?unavailable:penMuted?@"Muted by driver":penActive?@"Active":@"Waiting for reports";
+    NSString *touchText=!controlling?unavailable:touchMuted?@"Muted by driver":touchActive?@"Active":@"Waiting for reports";
     NSUInteger readiness=[snapshot[@"gestureReadiness"] unsignedIntegerValue];
     BOOL suppressed=running && (readiness==BTGestureReadinessPen || readiness==BTGestureReadinessLiftRequired);
     if(touchActive && suppressed)touchText=@"Active — palm suppression";
     return @{@"pen":penText,@"touch":touchText,@"listen":listenGranted?@"Granted":@"Not granted",
              @"post":postGranted?@"Granted":@"Not granted",
-             @"penTone":!running?@"off":penActive?@"active":@"waiting",
-             @"touchTone":!running?@"off":touchActive?(suppressed?@"waiting":@"active"):@"waiting"};
+             @"penTone":!controlling || penMuted?@"off":penActive?@"active":@"waiting",
+             @"touchTone":!controlling || touchMuted?@"off":touchActive?(suppressed?@"waiting":@"active"):@"waiting"};
 }
 
 NSDictionary *UPLaunchDisplay(NSArray<NSDictionary *> *displays, NSString *savedUUID, NSString **reason) {
@@ -53,7 +61,7 @@ NSDictionary *UPLaunchDisplay(NSArray<NSDictionary *> *displays, NSString *saved
         if(match)[matches addObject:display];
     }
     if(matches.count==1 && ![matches[0][@"mirrored"] boolValue])return matches[0];
-    if(reason)*reason=saved?@"Off: saved display missing, ambiguous or mirrored. Reconnect it or choose a display and Enable manually.":
-        @"Off: no unique nonmirrored Bosto Tablet display. Connect it or choose a display and Enable manually.";
+    if(reason)*reason=saved?@"Off: saved display missing, ambiguous or mirrored. Reconnect it or choose a display and start the driver manually.":
+        @"Off: no unique nonmirrored Bosto Tablet display. Connect it or choose a display and start the driver manually.";
     return nil;
 }
