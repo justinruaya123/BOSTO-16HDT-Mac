@@ -120,10 +120,9 @@ manual display was previously saved. Turn it off to choose a display manually.
 
 With Touch and Pen on, hovering the pen counts as pen input: the tip does not need to touch the glass. During pen use, palm rejection must cover both the display digitizer and the Bosto’s own native multitouch interface (`01:02`). The latter is normally available to macOS for finger gestures. With Touch off, both display touch interfaces stay muted while the driver runs. These controls apply to the Bosto display, not to the Mac’s trackpad or other accessories.
 
-**Gestures** keeps native two-finger scroll/pan and pinch zoom by default.
-Either gesture can run a recorded keyboard shortcut instead or be turned off.
-The tab shows how many reports carried multiple contacts; those counts do not
-prove an app received the resulting gesture.
+**Gestures → Native multitouch** (default): macOS and the receiving app handle finger gestures from the Bosto companion interface. BostoTablet does not turn the first finger into a mouse-down while you are placing the second finger for a pinch. It does not generate finger clicks, drags, scrolls, zooms or shortcuts in this mode. Which gestures work, and where zoom is centered, depend on macOS and the app. This is not a system-wide direct-touchscreen API.
+
+Choose **Compatibility** if you need BostoTablet to map one finger to an absolute position on the display, flip the touch Y axis, or map gestures to keyboard shortcuts. Switching modes does not change your Mac trackpad settings.
 
 BostoTablet starts pen and touch automatically when the selected display, exact
 USB interfaces, and existing macOS permissions are ready. It also resumes on

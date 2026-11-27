@@ -17,8 +17,10 @@ NSArray<NSNumber *> *BTTabletRegistryIdentity(void);
 #ifdef BT_UNIFIED_DRIVER
 // Main-thread settings for the next start. Changing an active claim requires stop/restart.
 @property(nonatomic) BOOL touchInputEnabled, penInputEnabled;
+// YES (default): macOS owns finger output. NO: use the compatibility gesture synthesizer.
+@property(nonatomic) BOOL nativeTouchEnabled;
 @property(nonatomic) BOOL flipTouchY;
-// Missing keys use native output. Values are @"off", @"shortcut" (unassigned), or a key binding.
+// Compatibility only. Missing keys use synthesized scroll/magnify instead of a key binding.
 @property(nonatomic,copy) NSDictionary<NSString *,id> *gestureActions;
 #endif
 - (void)stop;

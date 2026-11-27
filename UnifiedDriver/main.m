@@ -17,6 +17,7 @@ static NSString *const UPFlipTouchYKey=@"flipTouchY";
 static NSString *const UPTouchInputKey=@"touchInputEnabled";
 static NSString *const UPPenInputKey=@"penInputEnabled";
 static NSString *const UPInputDisabledKey=@"inputDisabled";
+static NSString *const UPTouchModeKey=@"touchMode"; // Only an explicit Compatibility selection opts out of Native.
 static NSString *const UPGestureActionsKey=@"gestureActions";
 static NSString *gestureKey(NSUInteger row) { return row==0?@"swipe":@"pinch"; }
 static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField labelWithString:text];v.frame=r;return v;}
@@ -34,6 +35,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
 @property(nonatomic,strong) NSLevelIndicator *rawMeter,*effectiveMeter;
 @property(nonatomic,strong) NSArray<UPShortcutEditor *> *editors;
 @property(nonatomic,strong) NSArray<UPShortcutEditor *> *gestureEditors;
+@property(nonatomic,strong) NSArray<NSPopUpButton *> *gesturePickers;
 @property(nonatomic,strong) NSTextField *gestureStatus;
 @property(nonatomic,strong) NSMutableArray *bindings;
 @property(nonatomic,strong) NSUserDefaults *preferences;
@@ -62,7 +64,6 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.bindings=[UPValidatedBindings(saved[@"penShortcutBindings"]) mutableCopy];
     [BTPenMonitor updatePressureExponent:self.exponent];[BTPenMonitor updateShortcutBindings:self.bindings];
     self.touch=[BTTouchController new]; // HID opens only through the shared, permission-gated start path.
-    [self restoreTouchOrientation];[self restoreGestureActions];
     self.window=[[NSWindow alloc]initWithContentRect:NSMakeRect(0,0,700,550) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
     self.window.title=@"BostoTablet";self.window.releasedWhenClosed=NO;self.window.delegate=self;
     [self composeControlsInView:self.window.contentView resumeDelay:self.touch.resumeDelay];
@@ -105,11 +106,12 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.displays=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(200,388,255,28) pullsDown:NO];self.displays.target=self;self.displays.action=@selector(selectDisplay:);[v addSubview:self.displays];
     self.autoDetectTablet=[NSButton checkboxWithTitle:@"Auto-detect tablet" target:self action:@selector(toggleAutoDetectTablet:)];
     self.autoDetectTablet.frame=NSMakeRect(470,390,170,24);[v addSubview:self.autoDetectTablet];
-    [v addSubview:label(@"Touch orientation",NSMakeRect(20,322,180,24))];
+    [v addSubview:label(@"Compatibility touch Y",NSMakeRect(20,322,180,24))];
     self.touchOrientation=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(200,320,235,28) pullsDown:NO];
-    [self.touchOrientation setAccessibilityLabel:@"Touch orientation"];
+    [self.touchOrientation setAccessibilityLabel:@"Compatibility touch orientation"];
+    self.touchOrientation.toolTip=@"Applies only to direct touch in Compatibility mode.";
     [self.touchOrientation addItemsWithTitles:@[@"Normal",@"Flip vertical"]];
-    [self.touchOrientation selectItemAtIndex:self.touch.flipTouchY?1:0];
+    [self.touchOrientation selectItemAtIndex:[[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES]?1:0];
     self.touchOrientation.target=self;self.touchOrientation.action=@selector(changeTouchOrientation:);[v addSubview:self.touchOrientation];
     [v addSubview:label(@"Touch delay after pen exit (0–30 s)",NSMakeRect(20,352,300,24))];
     self.delay=[[NSTextField alloc]initWithFrame:NSMakeRect(340,352,90,24)];self.delay.doubleValue=resumeDelay;[v addSubview:self.delay];
@@ -178,51 +180,71 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     [tabs addTabViewItem:diagnostics];
     [tabs selectTabViewItemAtIndex:0];
 }
-- (void)restoreGestureActions {
-    self.touch.gestureActions=[self.preferences objectForKey:UPGestureActionsKey];
+- (BOOL)requestsNativeTouch {
+    return ![[self.preferences objectForKey:UPTouchModeKey] isEqual:@"compatibility"];
+}
+- (NSDictionary *)savedGestureActions {
+    id saved=[self.preferences objectForKey:UPGestureActionsKey];
+    return [saved isKindOfClass:NSDictionary.class]?saved:@{};
 }
 - (void)saveGestureAction:(id)action forKey:(NSString *)key {
-    NSMutableDictionary *actions=[self.touch.gestureActions mutableCopy];
+    if(self.requestsNativeTouch || self.changingInputs)return;
+    NSMutableDictionary *actions=[self.savedGestureActions mutableCopy];
     actions[key]=action;
-    self.touch.gestureActions=actions;
-    [self.preferences setObject:self.touch.gestureActions forKey:UPGestureActionsKey];
+    [self.preferences setObject:actions forKey:UPGestureActionsKey];
+    if(self.touch.running)self.touch.gestureActions=actions;
+}
+- (void)updateCompatibilityControls {
+    BOOL editable=!self.requestsNativeTouch && !self.changingInputs;
+    self.touchOrientation.enabled=editable;
+    for(NSPopUpButton *picker in self.gesturePickers){
+        picker.enabled=editable;
+        self.gestureEditors[(NSUInteger)picker.tag].enabled=editable && picker.indexOfSelectedItem==1;
+    }
 }
 - (NSTabViewItem *)gestureTabWithFrame:(NSRect)frame {
     NSTabViewItem *tab=[[NSTabViewItem alloc]initWithIdentifier:@"gestures"];
     tab.label=@"Gestures";
     NSView *view=[[NSView alloc]initWithFrame:frame];tab.view=view;
-    [view addSubview:label(@"Two-finger gestures",NSMakeRect(20,437,620,28))];
-    [view addSubview:label(@"Single-finger taps and drags are not affected.",NSMakeRect(20,404,620,24))];
+    [view addSubview:label(@"Touch mode",NSMakeRect(20,438,135,24))];
+    NSPopUpButton *mode=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(160,435,270,28) pullsDown:NO];
+    [mode setAccessibilityLabel:@"Touch mode"];
+    [mode addItemsWithTitles:@[@"Native multitouch",@"Compatibility"]];
+    [mode selectItemAtIndex:self.requestsNativeTouch?0:1];mode.target=self;mode.action=@selector(changeTouchMode:);[view addSubview:mode];
+    NSTextField *explanation=label(@"Native multitouch (default): macOS handles gestures. Choose Compatibility for direct clicks and drags at the touched position, synthetic scroll and pinch, or touch shortcuts.",NSMakeRect(20,372,620,58));
+    explanation.maximumNumberOfLines=3;explanation.lineBreakMode=NSLineBreakByWordWrapping;[view addSubview:explanation];
     NSArray *titles=@[@"Two-finger swipe: scroll / pan",@"Pinch: zoom"];
-    NSMutableArray *editors=[NSMutableArray array];
+    NSMutableArray *editors=[NSMutableArray array],*pickers=[NSMutableArray array];
     for(NSUInteger row=0;row<titles.count;row++){
-        NSString *key=gestureKey(row);id action=self.touch.gestureActions[key];
-        BOOL isBinding=[action isKindOfClass:NSDictionary.class];
+        NSString *key=gestureKey(row);id action=self.savedGestureActions[key];
+        NSDictionary *binding=UPValidatedShortcut(action);
+        BOOL isBinding=binding!=nil;
         NSInteger mode=[action isEqual:@"off"]?2:(isBinding || [action isEqual:@"shortcut"])?1:0;
-        CGFloat y=335-row*85;
+        CGFloat y=311-row*79;
         [view addSubview:label(titles[row],NSMakeRect(20,y+30,620,24))];
         NSPopUpButton *picker=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(20,y,210,28) pullsDown:NO];
         [picker setAccessibilityLabel:titles[row]];
         [picker addItemsWithTitles:@[@"Default",@"Keyboard Shortcut",@"Off"]];
         [picker selectItemAtIndex:mode];picker.tag=(NSInteger)row;
-        picker.target=self;picker.action=@selector(changeGestureAction:);[view addSubview:picker];
+        picker.target=self;picker.action=@selector(changeGestureAction:);[view addSubview:picker];[pickers addObject:picker];
         UPShortcutEditor *editor=[[UPShortcutEditor alloc]initWithFrame:NSMakeRect(247,y,375,28)];
         editor.bezelStyle=NSBezelStyleRounded;
-        editor.binding=isBinding?action:nil;editor.enabled=mode==1;
+        editor.binding=binding;
         __weak UPApp *owner=self;
         editor.bindingChanged=^(NSDictionary *binding){[owner saveGestureAction:binding forKey:key];};
         [view addSubview:editor];[editors addObject:editor];
     }
-    self.gestureEditors=editors;
-    [view addSubview:label(@"A recorded shortcut runs once per gesture in the focused app.",NSMakeRect(20,194,620,24))];
-    self.gestureStatus=label(@"",NSMakeRect(20,99,620,64));
-    self.gestureStatus.maximumNumberOfLines=3;
+    self.gestureEditors=editors;self.gesturePickers=pickers;[self updateCompatibilityControls];
+    [view addSubview:label(@"Touch shortcuts are saved in both modes but run only in Compatibility.",NSMakeRect(20,183,620,28))];
+    self.gestureStatus=label(@"",NSMakeRect(20,70,620,88));
+    self.gestureStatus.maximumNumberOfLines=4;
     self.gestureStatus.lineBreakMode=NSLineBreakByWordWrapping;
     self.gestureStatus.font=[NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
     [view addSubview:self.gestureStatus];
     return tab;
 }
 - (void)changeGestureAction:(NSPopUpButton *)sender {
+    if(self.requestsNativeTouch || self.changingInputs)return;
     NSString *key=gestureKey((NSUInteger)sender.tag);
     UPShortcutEditor *editor=self.gestureEditors[(NSUInteger)sender.tag];
     [self.window makeFirstResponder:nil];
@@ -306,27 +328,35 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     BOOL enabled=sender.state==NSControlStateValueOn;
     if(enabled==[self requestsInputForKey:key])return;
     [self.preferences setBool:enabled forKey:key];
+    [self inputConfigurationChanged];
+}
+- (void)changeTouchMode:(NSPopUpButton *)sender {
+    NSInteger index=sender.indexOfSelectedItem;
+    if((index!=0 && index!=1) || (index==0)==self.requestsNativeTouch)return;
+    [self.window makeFirstResponder:nil]; // End any in-progress shortcut capture.
+    [self.preferences setObject:index==0?@"native":@"compatibility" forKey:UPTouchModeKey];
+    [self inputConfigurationChanged];
+}
+- (void)inputConfigurationChanged {
     if(!self.changingInputs && ![[self.preferences objectForKey:UPInputDisabledKey] isEqual:@YES]){
         self.changingInputs=YES;self.lastInputAttempt=nil;
         // A fault may already have queued cleanup. Never apply settings before those releases.
         if(self.touch.running)[self.touch stop];
         dispatch_async(dispatch_get_main_queue(),^{
             self.changingInputs=NO;
-            [self reconcileInput]; // Recheck Stop, connection and grants; read the latest pair.
+            [self reconcileInput]; // Recheck Stop, connection and grants; read the latest input choices and touch mode.
             [self refresh:nil];
         });
     }
     [self refresh:nil];
 }
-- (void)restoreTouchOrientation {
-    self.touch.flipTouchY=[[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES];
-}
 - (void)changeTouchOrientation:(NSPopUpButton *)sender {
+    if(self.requestsNativeTouch || self.changingInputs)return;
     NSInteger index=sender.indexOfSelectedItem;
     if(index!=0 && index!=1)return;
     BOOL flip=index==1;
-    self.touch.flipTouchY=flip;
-    if(self.touch.flipTouchY!=flip){
+    if(self.touch.running)self.touch.flipTouchY=flip;
+    if(self.touch.running && self.touch.flipTouchY!=flip){
         [sender selectItemAtIndex:self.touch.flipTouchY?1:0];
         NSBeep();
         return;
@@ -433,6 +463,10 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSScanner *ds=[NSScanner scannerWithString:self.delay.stringValue];double delay=0;
     if(!display || [display[@"mirrored"] boolValue] || ![ds scanDouble:&delay] || !ds.isAtEnd || !isfinite(delay) || delay<0 || delay>30){self.failure=@"Choose a display; delay must be 0–30.";[self refresh:nil];return;}
     if(allowRequests)self.lastInputAttempt=[self inputCandidateForDisplay:display];
+    BOOL native=self.requestsNativeTouch;
+    self.touch.nativeTouchEnabled=native;
+    self.touch.gestureActions=native?@{}:self.savedGestureActions;
+    self.touch.flipTouchY=!native && [[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES];
     self.touch.touchInputEnabled=[self requestsInputForKey:UPTouchInputKey];
     self.touch.penInputEnabled=[self requestsInputForKey:UPPenInputKey];
     [self.touch updateResumeDelay:delay];[BTPenMonitor configureDisplay:[display[@"id"] unsignedIntValue] pressureExponent:self.exponent];
@@ -489,16 +523,22 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     state[@"touchInputEnabled"]=@(self.touch.touchInputEnabled);
     state[@"penInputEnabled"]=@(self.touch.penInputEnabled);
     state[@"penSeized"]=state[@"penObserver"][@"seized"]?:@NO;
-    if(!running)self.gestureStatus.stringValue=@"Input is not running. Check Home / Setup.";
-    else self.gestureStatus.stringValue=[NSString stringWithFormat:@"This session: %@ reports with 2+ contacts · peak %@ fingers\nMultitouch report callbacks: %@ · native scroll events: %@ · native zoom events: %@",
-        state[@"multiContactFrames"],state[@"peakContacts"],state[@"rawReportIDs"][@"4"]?:@0,state[@"scrollEvents"],state[@"magnifyEvents"]];
+    [self updateCompatibilityControls];
     BOOL listen=IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)==kIOHIDAccessTypeGranted;
     BOOL post=CGPreflightPostEventAccess();
+    BOOL controlling=UPSetupControlsInput(state,listen,post,self.failure!=nil);
+    if(!controlling)self.gestureStatus.stringValue=@"No active touch session confirmed. Check Home / Setup.";
+    else if(!self.touch.touchInputEnabled)self.gestureStatus.stringValue=@"Touch is muted by the driver.";
+    else {
+        NSString *output=self.touch.nativeTouchEnabled?@"Native: macOS handles gestures; app delivery is not measured.":
+            [NSString stringWithFormat:@"Synthetic scroll events: %@ · synthetic zoom events: %@",state[@"scrollEvents"]?:@0,state[@"magnifyEvents"]?:@0];
+        self.gestureStatus.stringValue=[NSString stringWithFormat:@"This session: %@ reports with 2+ contacts · peak %@ fingers\nMultitouch report callbacks: %@\n%@",
+            state[@"multiContactFrames"]?:@0,state[@"peakContacts"]?:@0,state[@"rawReportIDs"][@"4"]?:@0,output];
+    }
     self.enable.title=running || self.changingInputs?@"Stop driver (release tablet)":!listen?@"Request Input Monitoring…":!post?@"Request Accessibility…":@"Start driver";
     self.enable.enabled=!self.checkingPermission;
     UPMenuState menuState=UPSetupMenuState(state,listen,post,self.failure!=nil);
     NSString *description=menuState==UPMenuPen?@"BostoTablet: pen in range or palm cooldown":menuState==UPMenuTouch?@"BostoTablet: touch gestures ready":@"BostoTablet: unavailable — check setup";
-    BOOL controlling=UPSetupControlsInput(state,listen,post,self.failure!=nil);
     NSImage *icon=UPMenuIcon(menuState);
     if(controlling && menuState==UPMenuUnavailable && (!self.touch.touchInputEnabled || !self.touch.penInputEnabled)){
         // An intentionally muted input is not a setup fault.

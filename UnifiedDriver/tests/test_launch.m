@@ -65,7 +65,7 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 @property(nonatomic) BOOL running;
 @property(nonatomic) NSUInteger attempts;
 @property(nonatomic) CGDirectDisplayID startedDisplay;
-@property(nonatomic) BOOL flipTouchY,touchInputEnabled,penInputEnabled,cleaning;
+@property(nonatomic) BOOL nativeTouchEnabled,flipTouchY,touchInputEnabled,penInputEnabled,cleaning;
 @property(nonatomic,copy) NSDictionary *gestureActions;
 @end
 @implementation TestTouchSession
@@ -91,6 +91,8 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 - (NSString *)status { return @"Waiting for reports"; }
 - (void)setTouchInputEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setTouchInputEnabled:value]; }
 - (void)setPenInputEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setPenInputEnabled:value]; }
+- (void)setNativeTouchEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setNativeTouchEnabled:value]; }
+- (void)setGestureActions:(NSDictionary *)value { assert(!self.cleaning);[super setGestureActions:value]; }
 @end
 
 @interface TestApp : UPApp
@@ -118,35 +120,57 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 - (void)removeObjectForKey:(NSString *)key { [self.values removeObjectForKey:key]; }
 @end
 
-@interface UPApp (GesturePreferencesTest)
-- (void)restoreGestureActions;
-@end
-
-static void checkGesturePreferences(void) {
+static void drainMainQueue(void);
+static NSPopUpButton *pickerNamed(NSView *pane,NSString *name) {
+    for(NSView *child in pane.subviews)if([child isKindOfClass:NSPopUpButton.class] &&
+        [[(NSPopUpButton *)child accessibilityLabel] isEqual:name])return (NSPopUpButton *)child;
+    return nil;
+}
+static void choose(NSPopUpButton *picker,NSString *title) {
+    assert(picker.enabled && [picker itemWithTitle:title]);
+    [picker selectItemWithTitle:title];assert([picker sendAction:picker.action to:picker.target]);
+}
+static void checkGesturePreferences(NSDictionary *bosto) {
     [NSApplication sharedApplication];
-    TestPreferences *preferences=[TestPreferences new];preferences.values=[NSMutableDictionary dictionary];
+    connectedDisplays=@[bosto];tabletIdentity=@[@101,@201];listenGranted=postGranted=YES;
+    NSDictionary *binding=@{@"key":@6,@"modifiers":@(kCGEventFlagMaskCommand),@"name":@"Z"};
+    NSDictionary *legacy=@{@"gestureActions":@{@"swipe":binding,@"pinch":@"off"},@"flipTouchY":@YES,@"penInputEnabled":@NO};
+    TestPreferences *prefs=[TestPreferences new];prefs.values=[legacy mutableCopy];
     for(int launch=0;launch<2;launch++) {
-        TestApp *app=[TestApp new];app.preferences=(NSUserDefaults *)(id)preferences;
-        app.touch=[BTTouchController new];app.exponent=1;
-        if([app respondsToSelector:@selector(restoreGestureActions)])[app restoreGestureActions];
+        HomeApp *app=[HomeApp new];app.preferences=(NSUserDefaults *)(id)prefs;app.exponent=1;
+        DeferredTouchSession *session=[DeferredTouchSession new];app.touch=(BTTouchController *)(id)session;
         NSView *root=[[NSView alloc]initWithFrame:NSMakeRect(0,0,700,550)];
-        [app composeControlsInView:root resumeDelay:2];
+        [app composeControlsInView:root resumeDelay:2];[app reloadDisplays:nil];[app preselectLaunchDisplay];
         NSTabView *tabs=(NSTabView *)root.subviews.firstObject;
-        NSInteger index=[tabs indexOfTabViewItemWithIdentifier:@"gestures"];
-        assert(index!=NSNotFound && "Gesture actions must have a settings tab");
-        NSView *view=[tabs tabViewItemAtIndex:index].view;
-        NSMutableArray<NSPopUpButton *> *pickers=[NSMutableArray array];
-        for(NSView *child in view.subviews)if([child isKindOfClass:NSPopUpButton.class])[pickers addObject:(NSPopUpButton *)child];
-        assert(pickers.count==2);
-        assert([pickers[0].titleOfSelectedItem isEqual:@"Default"]);
-        assert([pickers[1].titleOfSelectedItem isEqual:(launch?@"Off":@"Default")]);
+        NSView *pane=[tabs tabViewItemAtIndex:[tabs indexOfTabViewItemWithIdentifier:@"gestures"]].view;
+        NSPopUpButton *mode=pickerNamed(pane,@"Touch mode"),*swipe=pickerNamed(pane,@"Two-finger swipe: scroll / pan"),*pinch=pickerNamed(pane,@"Pinch: zoom");
+        assert(mode && "Gestures must offer an accessible native/compatibility mode control");
+        assert(swipe && pinch && [swipe.titleOfSelectedItem isEqual:@"Keyboard Shortcut"]);
+        assert(session.running && session.touchInputEnabled && !session.penInputEnabled);
         if(!launch){
-            [pickers[1] selectItemWithTitle:@"Off"];
-            assert([pickers[1] sendAction:pickers[1].action to:pickers[1].target]);
-            assert([app.touch.gestureActions[@"pinch"] isEqual:@"off"] && !app.touch.gestureActions[@"swipe"]);
+            assert([mode.titleOfSelectedItem isEqual:@"Native multitouch"] && session.nativeTouchEnabled);
+            assert(!swipe.enabled && !pinch.enabled && !app.gestureEditors[0].enabled && !app.touchOrientation.enabled);
+            assert(!session.gestureActions.count && !session.flipTouchY && [prefs.values isEqual:legacy]);
+            assert(![app.gestureStatus.stringValue containsString:@"scroll events"]);
+            choose(mode,@"Compatibility");assert(session.cleaning && !session.running);
+            drainMainQueue();[app reconcileInput];
         }
+        assert([mode.titleOfSelectedItem isEqual:@"Compatibility"] && !session.nativeTouchEnabled);
+        assert(session.running && !session.penInputEnabled && session.touchInputEnabled && session.flipTouchY);
+        assert([session.gestureActions[@"swipe"] isEqual:binding] && [session.gestureActions[@"pinch"] isEqual:@"off"]);
+        assert(swipe.enabled && pinch.enabled && app.gestureEditors[0].enabled && !app.gestureEditors[1].enabled && app.touchOrientation.enabled);
+        assert([app.gestureStatus.stringValue containsString:@"Synthetic"]);
+        if(launch){
+            choose(pinch,@"Default");assert(![prefs objectForKey:@"gestureActions"][@"pinch"]);
+            choose(mode,@"Native multitouch");drainMainQueue();[app reconcileInput];
+            assert(session.running && session.nativeTouchEnabled && !session.gestureActions.count && !session.flipTouchY);
+            assert([[prefs objectForKey:@"gestureActions"][@"swipe"] isEqual:binding] && [[prefs objectForKey:@"flipTouchY"] isEqual:@YES]);
+            choose(mode,@"Compatibility");[app disable:nil];drainMainQueue();[app reconcileInput];
+            assert(!session.running); // Master Stop cancels a pending mode restart.
+        }
+        [session stop];drainMainQueue();
     }
-    puts("Gestures tab keeps native defaults and restores a changed action on the next launch.");
+    puts("Native upgrade leaves legacy choices dormant; Compatibility restores them across restart and relaunch (offline).");
 }
 
 static TestApp *launchWithSettings(NSArray<NSDictionary *> *displays, NSDictionary *saved) {
@@ -160,7 +184,6 @@ static TestApp *launchWithSettings(NSArray<NSDictionary *> *displays, NSDictiona
     app.touch=(BTTouchController *)(id)[TestTouchSession new];app.exponent=1;
     TestPreferences *preferences=[TestPreferences new];preferences.values=[saved mutableCopy];
     app.preferences=(NSUserDefaults *)(id)preferences;
-    [app restoreTouchOrientation];
     [app preselectLaunchDisplay];
     return app;
 }
@@ -233,8 +256,8 @@ static void checkInputSwitches(NSDictionary *bosto) {
 }
 
 int main(void) { @autoreleasepool {
-    checkGesturePreferences();
     NSDictionary *bosto=@{@"id":@42,@"uuid":@"tablet",@"name":@"Bosto Tablet",@"mirrored":@NO};
+    checkGesturePreferences(bosto);
     checkInputSwitches(bosto);
     NSDictionary *retina=@{@"id":@1,@"uuid":@"internal",@"name":@"Built-in Retina Display",@"mirrored":@NO};
     listenGranted=postGranted=YES;
@@ -260,7 +283,8 @@ int main(void) { @autoreleasepool {
     assert(!launchWithSettings(@[bosto],@{@"inputDisabled":@YES}).touch.running);
     TestApp *app=launch(@[retina,bosto]);
     TestTouchSession *session=(TestTouchSession *)(id)app.touch;
-    assert(session.running && session.attempts==1 && session.startedDisplay==42);
+    assert(session.running && session.attempts==1 && session.startedDisplay==42 && session.nativeTouchEnabled);
+    assert(((TestTouchSession *)(id)launchWithSettings(@[bosto],@{@"touchMode":@NO}).touch).nativeTouchEnabled);
     [app disable:nil];assert(!session.running && session.attempts==1);
     TestApp *detected=launchWithSettings(@[retina,bosto],@{@"selectedDisplayUUID":@"internal"});
     assert(((TestTouchSession *)(id)detected.touch).startedDisplay==42);
@@ -275,13 +299,14 @@ int main(void) { @autoreleasepool {
     [detected disable:nil];
     [detected reloadDisplays:[NSNotification notificationWithName:NSApplicationDidChangeScreenParametersNotification object:nil]];
     assert([detected.displays.selectedItem.representedObject isEqual:bosto] && !detected.touch.running);
-    TestApp *orientation=launchWithSettings(@[bosto],@{@"flipTouchY":@YES});
+    TestApp *orientation=launchWithSettings(@[bosto],@{@"touchMode":@"compatibility",@"flipTouchY":@YES});
     assert(orientation.touch.flipTouchY && !app.touch.flipTouchY);
     TestDisplayPicker *orientationPicker=[TestDisplayPicker new];orientationPicker.indexOfSelectedItem=1;
-    [app changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
-    assert(app.touch.flipTouchY && [[app.preferences objectForKey:@"flipTouchY"] isEqual:@YES]);
-    orientationPicker.indexOfSelectedItem=0;[app changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
-    assert(!app.touch.flipTouchY && [[app.preferences objectForKey:@"flipTouchY"] isEqual:@NO]);
+    [app changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];assert(!app.touch.flipTouchY);
+    [orientation changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
+    assert(orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@YES]);
+    orientationPicker.indexOfSelectedItem=0;[orientation changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
+    assert(!orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@NO]);
     TestApp *hotplug=launch(@[retina]);
     connectedDisplays=@[retina,bosto];
     [hotplug reloadDisplays:[NSNotification notificationWithName:NSApplicationDidChangeScreenParametersNotification object:nil]];

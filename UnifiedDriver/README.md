@@ -168,12 +168,9 @@ also checked separately with its finer native quantization tolerance.
 
 ## Gesture settings
 
-The **Gestures** tab offers **Default**, **Keyboard Shortcut**, and **Off**
-separately for two-finger swipe and pinch. Default uses native horizontal and
-vertical scroll events for pan/scroll and native magnify events for pinch.
-A recorded key runs once per recognized gesture in the focused app. These
-settings apply from the next gesture and don't replace single-finger taps,
-drags, or palm rejection.
+The **Gestures** tab defaults to **Native multitouch**, which leaves recognition and delivery to macOS through the tablet’s native companion. Driver-generated finger event counts should be zero in this mode. They cannot measure what an app receives from macOS.
+
+**Compatibility** uses the driver’s direct single-finger pointer and its two-finger recognizer. Swipe and pinch can use their default synthesized scroll/zoom events, trigger a shortcut, or be turned off. These per-gesture choices apply only in Compatibility; the hardware-specific pen palm guard applies in either mode.
 
 If gestures do not respond, check **reports with 2+ contacts** after a swipe.
 A count of zero means no valid multi-contact frame was decoded in that session;
