@@ -114,8 +114,9 @@ python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
 The package targets `/Applications/BostoTablet.app`. **Auto-detect tablet** is
 on by default and selects a unique nonmirrored **Bosto Tablet**, even if a
 manual display was previously saved. Turn it off to choose a display manually.
-**Touch orientation → Flip vertical** reverses only finger-touch Y; choose
-**Normal** to restore the original mapping. Both settings persist.
+**Touch orientation → Normal** (default) uses the former **Flip vertical** mapping.
+**Inverted** uses the former **Normal** mapping. The choice persists and applies
+to finger pointing in both touch modes, not to the pen or the Mac trackpad.
 **Touch** and **Pen** are independent settings for the BT-16HDT. Both default to on. Leave the driver running to enforce the settings: turning both off mutes the display’s input; stopping the driver releases the hardware to macOS.
 
 With Touch and Pen on, hovering the pen counts as pen input: the tip does not need to touch the glass. During pen use, palm rejection must cover both the display digitizer and the Bosto’s own native multitouch interface (`01:02`). The latter is normally available to macOS for finger gestures. With Touch off, both display touch interfaces stay muted while the driver runs. These controls apply to the Bosto display, not to the Mac’s trackpad or other accessories.

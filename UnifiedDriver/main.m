@@ -106,11 +106,11 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     self.displays=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(200,388,255,28) pullsDown:NO];self.displays.target=self;self.displays.action=@selector(selectDisplay:);[v addSubview:self.displays];
     self.autoDetectTablet=[NSButton checkboxWithTitle:@"Auto-detect tablet" target:self action:@selector(toggleAutoDetectTablet:)];
     self.autoDetectTablet.frame=NSMakeRect(470,390,170,24);[v addSubview:self.autoDetectTablet];
-    [v addSubview:label(@"Compatibility touch Y",NSMakeRect(20,322,180,24))];
+    [v addSubview:label(@"Touch orientation",NSMakeRect(20,322,180,24))];
     self.touchOrientation=[[NSPopUpButton alloc]initWithFrame:NSMakeRect(200,320,235,28) pullsDown:NO];
-    [self.touchOrientation setAccessibilityLabel:@"Compatibility touch orientation"];
-    self.touchOrientation.toolTip=@"Applies only to direct touch in Compatibility mode.";
-    [self.touchOrientation addItemsWithTitles:@[@"Normal",@"Flip vertical"]];
+    [self.touchOrientation setAccessibilityLabel:@"Touch orientation"];
+    self.touchOrientation.toolTip=@"Sets the vertical direction of Bosto finger input. Does not change the pen or trackpad.";
+    [self.touchOrientation addItemsWithTitles:@[@"Normal",@"Inverted"]];
     [self.touchOrientation selectItemAtIndex:[[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES]?1:0];
     self.touchOrientation.target=self;self.touchOrientation.action=@selector(changeTouchOrientation:);[v addSubview:self.touchOrientation];
     [v addSubview:label(@"Touch delay after pen exit (0–30 s)",NSMakeRect(20,352,300,24))];
@@ -196,7 +196,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
 }
 - (void)updateCompatibilityControls {
     BOOL editable=!self.requestsNativeTouch && !self.changingInputs;
-    self.touchOrientation.enabled=editable;
+    self.touchOrientation.enabled=!self.changingInputs;
     for(NSPopUpButton *picker in self.gesturePickers){
         picker.enabled=editable;
         self.gestureEditors[(NSUInteger)picker.tag].enabled=editable && picker.indexOfSelectedItem==1;
@@ -351,17 +351,17 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     [self refresh:nil];
 }
 - (void)changeTouchOrientation:(NSPopUpButton *)sender {
-    if(self.requestsNativeTouch || self.changingInputs)return;
+    if(self.changingInputs)return;
     NSInteger index=sender.indexOfSelectedItem;
     if(index!=0 && index!=1)return;
-    BOOL flip=index==1;
+    BOOL flip=index==0; // Normal compensates for the panel's reversed raw Y axis.
     if(self.touch.running)self.touch.flipTouchY=flip;
     if(self.touch.running && self.touch.flipTouchY!=flip){
-        [sender selectItemAtIndex:self.touch.flipTouchY?1:0];
+        [sender selectItemAtIndex:self.touch.flipTouchY?0:1];
         NSBeep();
         return;
     }
-    [self.preferences setBool:flip forKey:UPFlipTouchYKey];
+    [self.preferences setBool:index==1 forKey:UPFlipTouchYKey]; // Preserve the chosen menu option across upgrades.
     [self refresh:nil];
 }
 - (void)openPermissionSettings:(NSString *)pane {
@@ -466,7 +466,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     BOOL native=self.requestsNativeTouch;
     self.touch.nativeTouchEnabled=native;
     self.touch.gestureActions=native?@{}:self.savedGestureActions;
-    self.touch.flipTouchY=!native && [[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES];
+    self.touch.flipTouchY=![[self.preferences objectForKey:UPFlipTouchYKey] isEqual:@YES];
     self.touch.touchInputEnabled=[self requestsInputForKey:UPTouchInputKey];
     self.touch.penInputEnabled=[self requestsInputForKey:UPPenInputKey];
     [self.touch updateResumeDelay:delay];[BTPenMonitor configureDisplay:[display[@"id"] unsignedIntValue] pressureExponent:self.exponent];

@@ -10,7 +10,8 @@ waits for late connections and resumes after wake or a session switch. It
 tries each detected configuration once; a failed start does not loop.
 Disable persists until explicitly enabled. Automatic startup never requests
 permissions; use the setup button for missing grants.
-**Touch orientation** offers Normal and Flip vertical, persists immediately,
+**Touch orientation** offers Normal (default, formerly Flip vertical) and Inverted
+(formerly Normal) in both touch modes. The selection persists immediately
 and changes finger mapping only. Changing it during a gesture releases that
 output and waits for lift without restarting the input session. Quitting,
 disabling, an affected display change, sleep/session changes, permission loss,

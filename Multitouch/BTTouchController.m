@@ -68,7 +68,7 @@ static uint64_t touchUSBIdentity(IOHIDDeviceRef device, BOOL companion) {
 }
 // Pin the actual retained HID objects before the first exclusive open. No opened
 // manager or matching notification can extend these claims to hot-plugged devices.
-static NSArray *selectedTouchDevices(BOOL requireCompanion){
+static NSArray *selectedTouchDevices(BOOL requireCompanion,uint64_t *usbIdentity){
     IOHIDManagerRef discovery=IOHIDManagerCreate(NULL,kIOHIDManagerOptionIndependentDevices);
     if(!discovery)return nil;
     // Only Compatibility with the pen muted can work without the companion.
@@ -88,6 +88,7 @@ static NSArray *selectedTouchDevices(BOOL requireCompanion){
         if(isCompanion)companion=object;else digitizer=object;
     }
     if(!digitizer || (requireCompanion && !companion))return nil;
+    *usbIdentity=physical;
     return requireCompanion?@[digitizer,companion]:@[digitizer];
 }
 NSArray<NSNumber *> *BTTabletRegistryIdentity(void) {
@@ -136,7 +137,10 @@ NSArray<NSDictionary *> *BTAvailableDisplays(void) {
 #ifdef BT_UNIFIED_DRIVER
     BOOL _unifiedStopping,_unifiedCleaning,_touchReportExpired,_sessionPenEnabled;
     BOOL _sessionTouchEnabled,_sessionNativeTouchEnabled;
-    BOOL _nativeAwaitingLift; // Contact already in progress at startup or an unreadable report 4.
+    BOOL _nativeAwaitingLift; // Startup, unreadable input or an ambiguous format transition.
+    BOOL _modeSwitchAwaitingLift;
+    uint64_t _lastTouchUSBIdentity;
+    uint32_t _nativePointerReportID; // First usable level/point (3), then contact-counted (4) until restart.
     NSArray *_pinnedTouches;
     NSUInteger _openedTouchCount,_scheduledTouchCount;
     BOOL _initializingTouch,_palmCompanionHeld,_touchLevelKnown;
@@ -314,8 +318,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     _scrollEvents=_magnifyEvents=_cancelEvents=0;_heldEvent=(BTGestureEvent){0};
     BTGestureConfig config=BTGestureDefaultConfig();config.resumeDelay=self.resumeDelay;
 #ifdef BT_UNIFIED_DRIVER
-    _sessionNativeTouchEnabled=self.nativeTouchEnabled;
-    config.nativeSinglePointer=_sessionNativeTouchEnabled;
+    config.nativeSinglePointer=self.nativeTouchEnabled;
     config.allowTouchBeforePenReport=true;
 #endif
     (void)BTGestureInit(&_gestures,config);
@@ -328,12 +331,19 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     _lastFrameAt=now();_lastDownAt=-INFINITY;_clickCount=1;
 #ifdef BT_UNIFIED_DRIVER
     _sessionTouchEnabled=self.touchInputEnabled;
-    _nativeAwaitingLift=NO;
+    _nativeAwaitingLift=NO;_nativePointerReportID=0;
     _postEvents=_sessionTouchEnabled;
     _sessionPenEnabled=self.penInputEnabled;
-    _pinnedTouches=selectedTouchDevices(!_sessionTouchEnabled || _sessionNativeTouchEnabled || _sessionPenEnabled);
+    uint64_t usbIdentity=0;
+    _pinnedTouches=selectedTouchDevices(!_sessionTouchEnabled || self.nativeTouchEnabled || _sessionPenEnabled,&usbIdentity);
     if(!_pinnedTouches)return [self fail:@"Could not identify the exact Bosto USB touch interfaces for this mode; nothing opened." code:4 error:error];
-    _touchLevelKnown=NO;_unclearedStreams=0;
+    // A release posted during stop balances the button, not the physical finger.
+    // Carry observed levels through a mode switch on this same USB attachment.
+    _modeSwitchAwaitingLift=_sessionTouchEnabled && usbIdentity==_lastTouchUSBIdentity &&
+        (_sessionNativeTouchEnabled!=self.nativeTouchEnabled || _modeSwitchAwaitingLift) && _unclearedStreams;
+    if(!_modeSwitchAwaitingLift)_unclearedStreams=0;
+    _sessionNativeTouchEnabled=self.nativeTouchEnabled;
+    _lastTouchUSBIdentity=usbIdentity;_touchLevelKnown=NO;
     IOHIDDeviceRef digitizer=(__bridge IOHIDDeviceRef)_pinnedTouches[0];
 #else
     _postEvents=postEvents;
@@ -604,10 +614,12 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     if(remaining>0){self.status=[NSString stringWithFormat:@"Pen left — touch resumes in %.1f seconds. Lift resting fingers.",remaining];return;}
 #ifdef BT_UNIFIED_DRIVER
     if(_palmCompanionHeld){self.status=@"Lift all fingers to resume native Bosto touch.";return;}
+    if(_modeSwitchAwaitingLift){self.status=@"Lift all fingers to resume touch after switching modes.";return;}
     if(_sessionNativeTouchEnabled){
         self.status=([self touchReadiness]==BTGestureReadinessLiftRequired)?@"Lift all fingers to resume the absolute pointer; macOS handles gestures.":
-            (_report4Seen?@"Single-finger pointer uses report 4; macOS handles multitouch gestures.":
-             @"Waiting for report 4 for the absolute pointer; macOS handles multitouch gestures.");
+            (_nativePointerReportID==4?@"Single-finger pointer uses report 4; macOS handles multitouch gestures.":
+             _nativePointerReportID==3?@"Direct pointer (report 3). A pinch can look like a tap or drag.":
+             @"Touch ready — tap or drag on the selected display.");
         return;
     }
 #endif
@@ -626,6 +638,33 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     BOOL valid=BTGestureHandlePen(&_gestures,(BTGesturePenInput){presence,now()},&batch);
     if([self dispatchBatch:batch valid:valid])[self refreshTouchState];
 }
+#ifdef BT_UNIFIED_DRIVER
+- (void)interruptNativePointer {
+    _nativeAwaitingLift=YES;_activeReportID=0;
+    [self cancelGesture]; // Drop a pending tap or balance an already posted down.
+    if(_heldEvent.phase!=BTGesturePhaseNone){[self stop];self.status=@"Could not release interrupted touch; disabled.";}
+}
+- (BOOL)acceptNativeReport:(uint32_t)reportID contacts:(size_t)count at:(double)time {
+    // Report 3 supplies a level and a point, not the number of fingers. Never
+    // use it to end or restart report 4, even if a duplicate arrives very late.
+    if(_nativePointerReportID==4 && reportID==3)return NO;
+    if(count && reportID==4 && _nativePointerReportID==3){
+        // The first richer stroke may repeat a completed vendor tap, or be the
+        // second half of a drag. Sacrifice it rather than guess from time/XY.
+        [self interruptNativePointer];
+    }
+    if(count)_nativePointerReportID=reportID;
+    if(_unifiedStopping)return NO;
+    if(!self.running || _nativeAwaitingLift){
+        if(reportID==_nativePointerReportID){_contacts=count;_lastFrameAt=time;}
+        // Before a counted stroke, both observed levels must clear. Once report
+        // 4 owns the pointer, only its lift rearms it; the palm guard still tracks both.
+        _nativeAwaitingLift=(_nativePointerReportID==4?(_unclearedStreams&(1u<<4)):_unclearedStreams)!=0;
+        return self.running && !_nativeAwaitingLift; // Forward the real clean boundary to the gesture policy.
+    }
+    return reportID!=4 || _nativePointerReportID==4; // Idle report 4 cannot lift a vendor stroke.
+}
+#endif
 - (void)received:(uint8_t *)bytes length:(CFIndex)length reportID:(uint32_t)reportID sender:(void *)sender result:(IOReturn)result {
 #ifdef BT_UNIFIED_DRIVER
     if((!self.running && !_initializingTouch) || !_sessionTouchEnabled || sender!=(__bridge void *)_pinnedTouches.firstObject)return;
@@ -643,18 +682,15 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
         // A missing/malformed sample may be a down. Do not hand a potentially
         // held contact to macOS based on an older clear from either format.
         _unclearedStreams|=1u<<reportID;
-        if(_sessionNativeTouchEnabled && reportID==4){
-            _nativeAwaitingLift=YES;
-            [self cancelGesture]; // The unreadable frame might have added a second finger.
-            if(_heldEvent.phase!=BTGesturePhaseNone){[self stop];self.status=@"Could not release interrupted touch; disabled.";}
-        }
+        if(_sessionNativeTouchEnabled && (reportID==4 || _nativePointerReportID!=4))[self interruptNativePointer];
 #endif
         _invalid++;return;
     }
     _valid++;
-    _peakContacts=MAX(_peakContacts,frame.count);
-    if(frame.count>=2)_multiContactFrames++;
-    if(reportID==4 && frame.count)_report4Seen=YES;
+    if(reportID==4 && frame.count){
+        _report4Seen=YES;_peakContacts=MAX(_peakContacts,frame.count);
+        if(frame.count>=2)_multiContactFrames++;
+    }
     double time=now();
 #ifdef BT_UNIFIED_DRIVER
     // Observe both formats before arbitration: the losing stream can still
@@ -662,13 +698,13 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     unsigned stream=1u<<reportID;
     _touchLevelKnown=YES;
     if(frame.count)_unclearedStreams|=stream;else _unclearedStreams&=~stream;
-    if(_sessionNativeTouchEnabled && reportID==3){
-        // A vendor mouse packet has no contact count. It cannot start, extend
-        // or lift a direct pointer; it is still evidence for the palm guard.
-        [self refreshTouchState];return;
+    if(!_unclearedStreams)_modeSwitchAwaitingLift=NO;
+    BOOL accepted=!_sessionNativeTouchEnabled || [self acceptNativeReport:reportID contacts:frame.count at:time];
+    if(!accepted || _modeSwitchAwaitingLift){
+        if(!_unifiedStopping)[self refreshTouchState];
+        return;
     }
-    if(_sessionNativeTouchEnabled && (!self.running || !frame.count))_nativeAwaitingLift=frame.count!=0;
-    if(_palmCompanionHeld || !self.running || _nativeAwaitingLift){
+    if(_palmCompanionHeld || !self.running){
         // During startup remember contacts but never synthesize touch events.
         if(reportID==4 && (frame.count || _activeReportID==4))_report4PreferredUntil=time+0.5;
         _contacts=_sessionNativeTouchEnabled?frame.count:(frame.count?:(_unclearedStreams?1:0));_lastFrameAt=time;
@@ -826,7 +862,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
     BTGestureReadiness readiness=BTGestureGetReadiness(&_gestures,now());
 #ifdef BT_UNIFIED_DRIVER
     if(_sessionNativeTouchEnabled && _sessionTouchEnabled && !_sessionPenEnabled && !_gestures.clockValid)readiness=BTGestureReadinessReady;
-    if((_palmCompanionHeld || _nativeAwaitingLift) && readiness==BTGestureReadinessReady)readiness=BTGestureReadinessLiftRequired;
+    if((_palmCompanionHeld || _nativeAwaitingLift || _modeSwitchAwaitingLift) && readiness==BTGestureReadinessReady)readiness=BTGestureReadinessLiftRequired;
 #endif
     return readiness;
 }
@@ -837,6 +873,7 @@ static void added(void *context,IOReturn result,void *sender,IOHIDDeviceRef devi
              @"touchRunningWithoutPen":@(self.running && _touchConfigurationAccepted && _penMonitor.unavailable),
              @"palmCompanionHeld":@(_palmCompanionHeld),
              @"nativeTouchEnabled":@(_sessionNativeTouchEnabled),
+             @"nativePointerReportID":@(_nativePointerReportID),
 #endif
              @"running":@(self.running),@"status":self.status?:@"",@"displayID":@(_display),@"interfaces":@(_devices),
              @"reports":@(_reports),@"rawReports":@(_rawReports),@"rawReportIDs":[_rawReportIDs copy]?:@{},@"activeReportID":@(_activeReportID),

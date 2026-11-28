@@ -159,14 +159,15 @@ static void checkGesturePreferences(NSDictionary *bosto) {
         assert(session.running && session.touchInputEnabled && !session.penInputEnabled);
         if(!launch){
             assert([mode.titleOfSelectedItem isEqual:@"Native multitouch"] && session.nativeTouchEnabled);
-            assert(!swipe.enabled && !pinch.enabled && !app.gestureEditors[0].enabled && !app.touchOrientation.enabled);
+            assert(!swipe.enabled && !pinch.enabled && !app.gestureEditors[0].enabled && app.touchOrientation.enabled);
+            assert([app.touchOrientation.titleOfSelectedItem isEqual:@"Inverted"]);
             assert(!session.gestureActions.count && !session.flipTouchY && [prefs.values isEqual:legacy]);
             assert(![app.gestureStatus.stringValue containsString:@"scroll events"]);
             choose(mode,@"Compatibility");assert(session.cleaning && !session.running);
             drainMainQueue();[app reconcileInput];
         }
         assert([mode.titleOfSelectedItem isEqual:@"Compatibility"] && !session.nativeTouchEnabled);
-        assert(session.running && !session.penInputEnabled && session.touchInputEnabled && session.flipTouchY);
+        assert(session.running && !session.penInputEnabled && session.touchInputEnabled && !session.flipTouchY);
         assert([session.gestureActions[@"swipe"] isEqual:binding] && [session.gestureActions[@"pinch"] isEqual:@"off"]);
         assert(swipe.enabled && pinch.enabled && app.gestureEditors[0].enabled && !app.gestureEditors[1].enabled && app.touchOrientation.enabled);
         assert([app.gestureStatus.stringValue containsString:@"Synthetic"]);
@@ -318,13 +319,15 @@ int main(void) { @autoreleasepool {
     [detected reloadDisplays:[NSNotification notificationWithName:NSApplicationDidChangeScreenParametersNotification object:nil]];
     assert([detected.displays.selectedItem.representedObject isEqual:bosto] && !detected.touch.running);
     TestApp *orientation=launchWithSettings(@[bosto],@{@"touchMode":@"compatibility",@"flipTouchY":@YES});
-    assert(orientation.touch.flipTouchY && !app.touch.flipTouchY);
+    assert(!orientation.touch.flipTouchY && app.touch.flipTouchY);
+    assert(launchWithSettings(@[bosto],@{@"touchMode":@"compatibility"}).touch.flipTouchY);
     TestDisplayPicker *orientationPicker=[TestDisplayPicker new];orientationPicker.indexOfSelectedItem=1;
-    [app changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];assert(!app.touch.flipTouchY);
+    TestApp *nativeOrientation=launch(@[bosto]);assert(nativeOrientation.touch.running && nativeOrientation.touch.flipTouchY);
+    [nativeOrientation changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];assert(!nativeOrientation.touch.flipTouchY);
     [orientation changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
-    assert(orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@YES]);
+    assert(!orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@YES]);
     orientationPicker.indexOfSelectedItem=0;[orientation changeTouchOrientation:(NSPopUpButton *)(id)orientationPicker];
-    assert(!orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@NO]);
+    assert(orientation.touch.flipTouchY && [[orientation.preferences objectForKey:@"flipTouchY"] isEqual:@NO]);
     TestApp *hotplug=launch(@[retina]);
     connectedDisplays=@[retina,bosto];
     [hotplug reloadDisplays:[NSNotification notificationWithName:NSApplicationDidChangeScreenParametersNotification object:nil]];
