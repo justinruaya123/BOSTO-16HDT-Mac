@@ -211,7 +211,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     [mode setAccessibilityLabel:@"Touch mode"];
     [mode addItemsWithTitles:@[@"Native multitouch",@"Compatibility"]];
     [mode selectItemAtIndex:self.requestsNativeTouch?0:1];mode.target=self;mode.action=@selector(changeTouchMode:);[view addSubview:mode];
-    NSTextField *explanation=label(@"Native multitouch (default): macOS handles gestures. Choose Compatibility for direct clicks and drags at the touched position, synthetic scroll and pinch, or touch shortcuts.",NSMakeRect(20,372,620,58));
+    NSTextField *explanation=label(@"Native multitouch: one finger points, taps on lift, or drags. Two or more fingers go to macOS for gestures. Choose Compatibility for driver-generated scroll, zoom, or shortcuts.",NSMakeRect(20,372,620,58));
     explanation.maximumNumberOfLines=3;explanation.lineBreakMode=NSLineBreakByWordWrapping;[view addSubview:explanation];
     NSArray *titles=@[@"Two-finger swipe: scroll / pan",@"Pinch: zoom"];
     NSMutableArray *editors=[NSMutableArray array],*pickers=[NSMutableArray array];
@@ -530,7 +530,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     if(!controlling)self.gestureStatus.stringValue=@"No active touch session confirmed. Check Home / Setup.";
     else if(!self.touch.touchInputEnabled)self.gestureStatus.stringValue=@"Touch is muted by the driver.";
     else {
-        NSString *output=self.touch.nativeTouchEnabled?@"Native: macOS handles gestures; app delivery is not measured.":
+        NSString *output=self.touch.nativeTouchEnabled?[NSString stringWithFormat:@"Pointer downs: %@ · drags: %@ · ups: %@. macOS handles gestures; app delivery is not measured.",state[@"downEvents"]?:@0,state[@"dragEvents"]?:@0,state[@"upEvents"]?:@0]:
             [NSString stringWithFormat:@"Synthetic scroll events: %@ · synthetic zoom events: %@",state[@"scrollEvents"]?:@0,state[@"magnifyEvents"]?:@0];
         self.gestureStatus.stringValue=[NSString stringWithFormat:@"This session: %@ reports with 2+ contacts · peak %@ fingers\nMultitouch report callbacks: %@\n%@",
             state[@"multiContactFrames"]?:@0,state[@"peakContacts"]?:@0,state[@"rawReportIDs"][@"4"]?:@0,output];

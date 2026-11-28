@@ -42,7 +42,7 @@ int main(void) { @autoreleasepool {
     assert([s[@"pen"] isEqual:@"Waiting for reports"] && [s[@"touch"] isEqual:@"Waiting for reports"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@1,@"pressureState":@"tipUp",@"presence":@"inRange"};
     state[@"gestureReadiness"]=@(BTGestureReadinessPen);state[@"validFrames"]=@1;s=UPSetupStatus(state,YES,YES,NO);
-    assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active — palm suppression"]);
+    assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Touch reports received — palm suppression"]);
     state[@"penObserver"]=@{@"running":@YES,@"reports":@0,@"pressureState":@"noData"};
     s=UPSetupStatus(state,YES,YES,NO);assert([s[@"pen"] isEqual:@"Waiting for reports"]);
     state[@"running"]=@NO;s=UPSetupStatus(state,YES,YES,NO);
@@ -52,11 +52,11 @@ int main(void) { @autoreleasepool {
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
     state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange",@"reports":@1,@"pressureState":@"outOfRange"};
     s=UPSetupStatus(state,YES,YES,NO);
-    assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active"]);
+    assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Touch reports received"]);
     NSMutableDictionary *degraded=[state mutableCopy];
     degraded[@"touchRunningWithoutPen"]=@YES;degraded[@"penObserver"]=@{@"running":@NO};
     NSDictionary *touchOnly=UPSetupStatus(degraded,YES,YES,NO);
-    assert([touchOnly[@"touch"] isEqual:@"Active"] && [touchOnly[@"pen"] isEqual:@"Unavailable — touch still enabled"]);
+    assert([touchOnly[@"touch"] isEqual:@"Touch reports received"] && [touchOnly[@"pen"] isEqual:@"Unavailable — touch still enabled"]);
     assert(UPSetupMenuState(degraded,YES,YES,NO)==UPMenuTouch);
     assert(!UPSetupControlsInput(degraded,NO,YES,NO));
     // Readiness, not recent contact/report activity, determines the ready menu.
@@ -88,9 +88,9 @@ int main(void) { @autoreleasepool {
     assert([s[@"pen"] isEqual:@"Muted by driver"] && [s[@"touch"] isEqual:@"Muted by driver"]);
     assert(UPSetupMenuState(state,YES,YES,NO)!=UPMenuPen);
     state[@"touchInputEnabled"]=@YES;state[@"gestureReadiness"]=@(BTGestureReadinessReady);
-    assert([UPSetupStatus(state,YES,YES,NO)[@"touch"] isEqual:@"Active"]);
+    assert([UPSetupStatus(state,YES,YES,NO)[@"touch"] isEqual:@"Touch reports received"]);
     for(NSDictionary *blocked in @[UPSetupStatus(state,NO,YES,NO),UPSetupStatus(state,YES,NO,NO)])
-        assert(![blocked[@"pen"] isEqual:@"Muted by driver"] && ![blocked[@"touch"] isEqual:@"Active"]);
+        assert(![blocked[@"pen"] isEqual:@"Muted by driver"] && ![blocked[@"touch"] isEqual:@"Touch reports received"]);
     state[@"running"]=@NO;
     assert(![UPSetupStatus(state,YES,YES,NO)[@"pen"] isEqual:@"Muted by driver"]);
     // A confirmed touch session need not have a pen device. Opening is not an input report.
@@ -101,7 +101,7 @@ int main(void) { @autoreleasepool {
     assert([s[@"touch"] isEqual:@"Waiting for reports"]);
     state[@"validFrames"]=@1;state[@"penInputEnabled"]=@YES;
     s=UPSetupStatus(state,YES,YES,NO);
-    assert([s[@"touch"] isEqual:@"Active"] && [s[@"touchTone"] isEqual:@"active"]);
+    assert([s[@"touch"] isEqual:@"Touch reports received"] && [s[@"touchTone"] isEqual:@"active"]);
     assert([s[@"pen"] isEqual:@"Waiting for pen device"] && UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
     assert(!UPSetupControlsInput(state,NO,YES,NO) && !UPSetupControlsInput(state,YES,YES,YES));
     state[@"running"]=@NO;

@@ -18,6 +18,7 @@ typedef struct { size_t count; BTGestureEvent events[BT_GESTURE_BATCH_CAPACITY];
 typedef struct {
     double resumeDelay,armingDelay,pointerSlop,scrollSlop,pinchSlop,minSpan,maxMagnification;
     bool allowTouchBeforePenReport;
+    bool nativeSinglePointer; /* Synthesize only solitary pointer actions; macOS owns multifinger input. */
 } BTGestureConfig;
 typedef struct { BTTouchFrame frame; BTDisplayBounds bounds; double time; } BTGestureTouchInput;
 typedef struct { BTPenPresence presence; double time; } BTGesturePenInput;
@@ -41,6 +42,6 @@ bool BTGestureHandlePen(BTGestureState *state,BTGesturePenInput input,BTGestureB
 bool BTGestureSetResumeDelay(BTGestureState *state,BTGestureDelayInput input,BTGestureBatch *batch);
 bool BTGestureTick(BTGestureState *state,double time,BTGestureBatch *batch);
 void BTGestureCancel(BTGestureState *state,BTGestureBatch *batch);
-/* End stalled output. A subsequent real pair may establish a new baseline. */
+/* End stalled output. Only the legacy gesture policy may rebaseline a subsequent pair. */
 void BTGestureCancelForReportGap(BTGestureState *state,double time,BTGestureBatch *batch);
 #endif

@@ -168,7 +168,7 @@ also checked separately with its finer native quantization tolerance.
 
 ## Gesture settings
 
-The **Gestures** tab defaults to **Native multitouch**, which leaves recognition and delivery to macOS through the tablet’s native companion. Driver-generated finger event counts should be zero in this mode. They cannot measure what an app receives from macOS.
+The **Gestures** tab defaults to **Native multitouch**, which leaves recognition and delivery to macOS through the tablet’s native companion. A verified single finger controls the absolute pointer, tap and drag. Scroll and zoom counters should remain zero in this mode: they do not measure what an app receives from macOS.
 
 **Compatibility** uses the driver’s direct single-finger pointer and its two-finger recognizer. Swipe and pinch can use their default synthesized scroll/zoom events, trigger a shortcut, or be turned off. These per-gesture choices apply only in Compatibility; the hardware-specific pen palm guard applies in either mode.
 

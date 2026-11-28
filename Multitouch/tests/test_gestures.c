@@ -55,7 +55,83 @@ static void checkLostSurvivorStaysBlocked(void){
         CHECK(touch(&s,pair,1.04).count==0);
     }
 }
+static BTGestureState nativeState(void){
+    BTGestureState s; BTGestureConfig c=BTGestureDefaultConfig();
+    c.nativeSinglePointer=true;c.allowTouchBeforePenReport=true;
+    CHECK(BTGestureInit(&s,c));return s;
+}
+static void checkPointer(BTGestureEvent e,BTGestureKind kind,BTGesturePhase phase,double x,double y){
+    CHECK(e.kind==kind && e.phase==phase);NEAR(e.x,x);NEAR(e.y,y);
+}
+static void checkNativeTapAndDrag(void){
+    BTGestureState s=nativeState();BTGestureBatch b;
+    BTTouchFrame center=one(8192,4800),corner=one(16384,9600),lift={0};
+    b=touch(&s,center,0);CHECK(b.count==1);
+    checkPointer(b.events[0],BTGesturePointerMove,BTGesturePhaseNone,-960.5,415.5);
+    CHECK(touch(&s,one(8193,4800),0.01).count==0); // Sub-slop jitter, not a drag.
+    CHECK(touch(&s,center,1).count==0);
+    b=touch(&s,lift,1.01);CHECK(b.count==2);
+    checkPointer(b.events[0],BTGesturePointerDown,BTGesturePhaseBegan,-960.5,415.5);
+    checkPointer(b.events[1],BTGesturePointerUp,BTGesturePhaseEnded,-960.5,415.5);
+    CHECK(touch(&s,lift,1.02).count==0);
+
+    (void)touch(&s,center,2);b=touch(&s,corner,2.01);CHECK(b.count==2);
+    checkPointer(b.events[0],BTGesturePointerDown,BTGesturePhaseBegan,-960.5,415.5);
+    checkPointer(b.events[1],BTGesturePointerDrag,BTGesturePhaseChanged,-1,955);
+    b=touch(&s,one(0,0),2.02);CHECK(b.count==1);
+    checkPointer(b.events[0],BTGesturePointerDrag,BTGesturePhaseChanged,-1920,-124);
+    b=touch(&s,lift,2.03);CHECK(b.count==1);
+    checkPointer(b.events[0],BTGesturePointerUp,BTGesturePhaseEnded,-1920,-124);
+    CHECK(touch(&s,lift,2.04).count==0);
+}
+static void checkNativeLatePartner(double delay){
+    BTGestureState s=nativeState();BTGestureBatch b;
+    (void)touch(&s,one(4000,4000),0);
+    CHECK(BTGestureTick(&s,delay,&b) && b.count==0);
+    CHECK(touch(&s,one(4000,4000),delay).count==0);
+    CHECK(touch(&s,two(4000,8000),delay).count==0);
+    CHECK(touch(&s,two(4500,8500),delay).count==0); // Pan.
+    CHECK(touch(&s,one(4500,4000),delay).count==0);
+    CHECK(touch(&s,one(5000,4000),delay).count==0); // No tail drag.
+    CHECK(touch(&s,two(5000,8500),delay).count==0);
+    CHECK(touch(&s,two(3000,10500),delay).count==0); // Returning partner, pinch.
+    CHECK(touch(&s,one(3000,4000),delay).count==0);
+    CHECK(touch(&s,(BTTouchFrame){0},delay).count==0); // No tail tap.
+    b=touch(&s,one(0,0),delay);CHECK(b.count==1 && b.events[0].kind==BTGesturePointerMove);
+    CHECK(touch(&s,(BTTouchFrame){0},delay).count==2);
+}
+static void checkNativeCancellation(void){
+    BTTouchFrame single=one(0,0),corner=one(16384,9600),pair=two(4000,8000),palm=pair,lift={0};
+    palm.count=3;palm.contacts[2]=(BTContact){9,5000,5000};
+    for(int drag=0;drag<=1;drag++)for(int reason=0;reason<5;reason++){
+        BTGestureState s=nativeState();BTGestureBatch b;
+        (void)touch(&s,single,0);
+        if(drag)(void)touch(&s,corner,0.01);
+        switch(reason){
+            case 0:b=touch(&s,pair,0.02);break;
+            case 1:b=touch(&s,palm,0.02);break;
+            case 2:BTGestureCancel(&s,&b);break; // Stop.
+            case 3:BTGestureCancelForReportGap(&s,1,&b);break;
+            default:b=pen(&s,BTPenInRange,0.02);break;
+        }
+        CHECK(b.count==(size_t)drag);
+        if(drag)checkPointer(b.events[0],BTGesturePointerUp,BTGesturePhaseCancelled,-1,955);
+        if(reason==4){
+            CHECK(touch(&s,corner,1).count==0);
+            (void)pen(&s,BTPenOutOfRange,2);
+            CHECK(touch(&s,single,3.9).count==0);
+        }
+        CHECK(touch(&s,pair,4).count==0);
+        CHECK(touch(&s,two(5000,9000),4.01).count==0);
+        CHECK(touch(&s,single,4.02).count==0);
+        CHECK(touch(&s,corner,4.03).count==0);
+        CHECK(touch(&s,lift,4.04).count==0);
+        b=touch(&s,single,4.05);CHECK(b.count==1 && b.events[0].kind==BTGesturePointerMove);
+        CHECK(touch(&s,lift,4.06).count==2);
+    }
+}
 int main(void){
+    checkNativeTapAndDrag();checkNativeLatePartner(0.06);checkNativeLatePartner(30);checkNativeCancellation();
     checkPairRecontact();checkLostSurvivorStaysBlocked();
     BTGestureState probe;CHECK(BTGestureInit(&probe,BTGestureDefaultConfig()));
     CHECK(BTGestureGetReadiness(&probe,0)==BTGestureReadinessUnknown);

@@ -40,10 +40,10 @@ NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL pos
         ![pen[@"pressureState"] isEqual:@"noData"] && ![pen[@"pressureState"] isEqual:@"inactive"];
     BOOL touchActive=controlling && !touchMuted && [snapshot[@"validFrames"] unsignedIntegerValue]>0;
     NSString *penText=!controlling?unavailable:[snapshot[@"touchRunningWithoutPen"] boolValue]?@"Unavailable — touch still enabled":waitingForDevice?@"Waiting for pen device":penMuted?@"Muted by driver":penActive?@"Active":@"Waiting for reports";
-    NSString *touchText=!controlling?unavailable:touchMuted?@"Muted by driver":touchActive?@"Active":@"Waiting for reports";
+    NSString *touchText=!controlling?unavailable:touchMuted?@"Muted by driver":touchActive?@"Touch reports received":@"Waiting for reports";
     NSUInteger readiness=[snapshot[@"gestureReadiness"] unsignedIntegerValue];
     BOOL suppressed=running && (readiness==BTGestureReadinessPen || readiness==BTGestureReadinessLiftRequired);
-    if(touchActive && suppressed)touchText=@"Active — palm suppression";
+    if(touchActive && suppressed)touchText=@"Touch reports received — palm suppression";
     return @{@"pen":penText,@"touch":touchText,@"listen":listenGranted?@"Granted":@"Not granted",
              @"post":postGranted?@"Granted":@"Not granted",
              @"penTone":!controlling || penMuted?@"off":penActive?@"active":@"waiting",
