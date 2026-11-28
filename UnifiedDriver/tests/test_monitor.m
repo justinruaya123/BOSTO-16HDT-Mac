@@ -14,6 +14,8 @@ static double fakeUptime=100;
 // Service 1 is borrowed; successive entries in ancestry are its owned parents.
 static NSArray<NSDictionary *> *ancestry;
 static int parentRefs;
+kern_return_t FakeRegistryID(io_registry_entry_t node,uint64_t *identity) { *identity=node;return node?KERN_SUCCESS:KERN_FAILURE; }
+#define IORegistryEntryGetRegistryEntryID FakeRegistryID
 kern_return_t FakeParent(io_registry_entry_t node,const io_name_t plane,io_registry_entry_t *parent){
     assert(node && !strcmp(plane,kIOServicePlane));
     if(node>ancestry.count){*parent=IO_OBJECT_NULL;return KERN_FAILURE;}
@@ -77,7 +79,7 @@ void FakeManagerUnschedule(IOHIDManagerRef m,CFRunLoopRef l,CFStringRef mode){(v
 CFTypeRef FakeProperty(IOHIDDeviceRef d,CFStringRef key){return CFDictionaryGetValue((CFDictionaryRef)d,key);}
 io_service_t FakeService(IOHIDDeviceRef d){return [((__bridge NSDictionary *)d)[@"service"] unsignedIntValue];}
 IOReturn FakeOpen(IOHIDDeviceRef d,IOOptionBits o){(void)d;assert(o==kIOHIDOptionsTypeSeizeDevice);opens++;return openResult;}
-IOReturn FakeClose(IOHIDDeviceRef d,IOOptionBits o){assert(exact(d));assert(o==kIOHIDOptionsTypeSeizeDevice);if(insideCallback)closesInsideCallback++;closes++;return 0;}
+IOReturn FakeClose(IOHIDDeviceRef d,IOOptionBits o){assert(UPVerifiedPenRegistryID(d));assert(o==kIOHIDOptionsTypeSeizeDevice);if(insideCallback)closesInsideCallback++;closes++;return 0;}
 void FakeReport(IOHIDDeviceRef d,uint8_t *buf,CFIndex n,IOHIDReportCallback cb,void *ctx){(void)d;(void)buf;assert(n==8);callback=cb;callbackContext=ctx;}
 void FakeDeviceRemoval(IOHIDDeviceRef d,IOHIDCallback cb,void *ctx){(void)d;deviceRemoval=cb;deviceRemovalContext=ctx;}
 void FakeDeviceSchedule(IOHIDDeviceRef d,CFRunLoopRef l,CFStringRef mode){(void)d;(void)l;assert(CFEqual(mode,kCFRunLoopCommonModes));}
@@ -121,8 +123,10 @@ int main(void){@autoreleasepool{
     assert([m startWithError:NULL]);deliver(0x11);assert(removal && removalContext);deviceRemoval(deviceRemovalContext,0,(__bridge void *)pen);drainMain();assert(!m.running && seen==BTPenUnknown);assert(ups==2 && exits==2 && closes==2);
     assert([m startWithError:NULL]);deliver(0x11);allowed=false;[m tick:nil];drainMain();assert(!m.running);assert(ups==3 && exits==3 && closes==3);
     int before=opens;assert(![m startWithError:NULL]);drainMain();assert(opens==before);allowed=true;
-    openResult=kIOReturnExclusiveAccess;assert(![m startWithError:NULL]);drainMain();assert(closes==4);openResult=0;
-    devices=@[];before=opens;assert(![m startWithError:NULL]);drainMain();assert(opens==before);
+    openResult=kIOReturnExclusiveAccess;assert(![m startWithError:NULL]);assert([m.snapshot[@"seized"] isEqual:@NO]);drainMain();assert(closes==3 && "Never close an unowned pen");openResult=0;
+    devices=@[];before=opens;assert([m startWithError:NULL]);
+    assert(m.running && [m.snapshot[@"waitingForDevice"] isEqual:@YES] && ![m.snapshot[@"seized"] boolValue]);
+    [m stop];drainMain();assert(opens==before);
     NSMutableDictionary *wrong=[pen mutableCopy];wrong[@kIOHIDProductIDKey]=@0x782c;devices=@[wrong];assert(![m startWithError:NULL]);drainMain();assert(opens==before);
     wrong[@kIOHIDProductIDKey]=@0x7821;wrong[@kIOHIDPrimaryUsagePageKey]=@1;assert(![m startWithError:NULL]);drainMain();assert(opens==before);
     // Discovery does not confer authority to open: independently verify USB identity.
@@ -136,8 +140,25 @@ int main(void){@autoreleasepool{
     }
     wrong=[pen mutableCopy];wrong[@kIOHIDLocationIDKey]=@0x12350000;devices=@[pen,wrong];
     assert(![m startWithError:NULL]);drainMain();assert(opens==before);
+    // A notification is not authorization. Re-enumerate to reject a stale
+    // notification, two simultaneous arrivals or an impostor with the right HID IDs.
+    NSMutableDictionary *replacement=[pen mutableCopy];replacement[@"service"]=@2;
+    for(int unsafe=0;unsafe<5;unsafe++) {
+        devices=@[];assert([m startWithError:NULL]);
+        devices=@[pen];IOReturn result=kIOReturnSuccess;
+        switch(unsafe){
+            case 0: devices=@[];break;            // stale callback after unplug
+            case 1: devices=@[wrong,pen];break;   // ambiguous batch
+            case 2: ancestry=@[interface];break;  // no physical USB ancestor
+            case 3: result=kIOReturnError;break;  // unsuccessful notification
+            case 4: devices=@[replacement];break; // only a different verified service is now present
+        }
+        matching(matchingContext,result,NULL,(__bridge IOHIDDeviceRef)pen);
+        drainMain();assert(!m.running && opens==before && parentRefs==0);
+        ancestry=@[interface,usbPen];
+    }
     devices=@[pen];assert([m startWithError:NULL]);deliver(0);assert(seen==BTPenOutOfRange);deliver(0x11);
-    uint8_t malformed[]={1,0x11};callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,malformed,2);drainMain();assert(!m.running);assert(ups==4 && exits==4 && closes==5);
+    uint8_t malformed[]={1,0x11};callback(callbackContext,0,NULL,kIOHIDReportTypeInput,1,malformed,2);drainMain();assert(!m.running);assert(ups==4 && exits==4 && closes==4);
     assert([m startWithError:NULL]);
     __block BTGestureState gestures={0};assert(BTGestureInit(&gestures,BTGestureDefaultConfig()));assert(gestures.config.resumeDelay==2);
     __block double time=10;

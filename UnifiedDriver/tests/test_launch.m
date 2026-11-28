@@ -55,6 +55,13 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 }
 @end
 
+// Stand-in for the menu-bar item; no system status item is created.
+@interface TestStatusItem : NSObject
+@property(nonatomic,strong) NSButton *button;
+@end
+@implementation TestStatusItem
+@end
+
 @interface TestDelay : NSObject
 @property(nonatomic, copy) NSString *stringValue;
 @end
@@ -78,6 +85,7 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
 - (void)stop { self.running=NO; } // Most launch tests do not interleave events with cleanup.
 @end
 @interface DeferredTouchSession : TestTouchSession
+@property(nonatomic) BOOL waitingForPen;
 @end
 @implementation DeferredTouchSession
 - (void)stop {
@@ -86,7 +94,9 @@ static NSArray<NSNumber *> *fakeTabletIdentity(void) { return tabletIdentity; }
     dispatch_async(dispatch_get_main_queue(),^{self.cleaning=NO;});
 }
 - (NSDictionary *)snapshot {
-    return @{@"running":@(self.running),@"penObserver":@{@"running":@(self.running),@"seized":@(self.running)}};
+    BOOL attached=self.running && !self.waitingForPen;
+    return @{@"running":@(self.running),@"penObserver":@{@"running":@(self.running),@"seized":@(attached),
+             @"waitingForDevice":@(self.running && self.waitingForPen),@"pressureState":!self.running?@"inactive":self.penInputEnabled?@"noData":@"muted"}};
 }
 - (NSString *)status { return @"Waiting for reports"; }
 - (void)setTouchInputEnabled:(BOOL)value { assert(!self.cleaning && !self.running);[super setTouchInputEnabled:value]; }
@@ -230,6 +240,13 @@ static void checkInputSwitches(NSDictionary *bosto) {
         drainMainQueue();[app reconcileInput];
         assert(session.running && !session.touchInputEnabled && !session.penInputEnabled && session.attempts==2);
         assert([app.setupLabels[0].stringValue isEqual:@"Muted by driver"] && [app.setupLabels[1].stringValue isEqual:@"Muted by driver"]);
+        TestStatusItem *item=[TestStatusItem new];item.button=[NSButton new];app.item=(id)item;
+        session.waitingForPen=YES;[app refresh:nil];
+        assert([app.setupLabels[0].stringValue isEqual:@"Waiting for pen device"] && [app.setupLabels[1].stringValue isEqual:@"Muted by driver"]);
+        assert([item.button.toolTip localizedCaseInsensitiveContainsString:@"waiting for pen device"]);
+        assert([app.tester.stringValue containsString:@"Waiting for pen device"]);
+        session.waitingForPen=NO;[app reconcileInput];[app refresh:nil];
+        assert(session.running && session.attempts==2 && [app.setupLabels[0].stringValue isEqual:@"Muted by driver"]);
         postGranted=NO;[app refresh:nil];
         assert(![app.setupLabels[0].stringValue containsString:@"Muted"]);
         postGranted=YES;app.failure=@"Session fault";[app refresh:nil];
@@ -265,7 +282,8 @@ int main(void) { @autoreleasepool {
     TestApp *lateUSB=launch(@[bosto]);
     TestTouchSession *lateSession=(TestTouchSession *)(id)lateUSB.touch;
     assert(lateSession.attempts==0 && !lateSession.running && "Launch must wait for the exact tablet USB interfaces");
-    tabletIdentity=@[@101,@201];
+    tabletIdentity=@[];[lateUSB reconcileInput];assert(!lateSession.running && lateSession.attempts==0);
+    tabletIdentity=@[@101]; // The registry found the eligible touch device before the pen.
     [lateUSB reconcileInput];assert(lateSession.running && lateSession.attempts==1);
     [lateSession stop];[lateUSB reconcileInput];assert(lateSession.attempts==1); // unchanged fault
     tabletIdentity=nil;[lateUSB reconcileInput];assert(lateSession.attempts==1);

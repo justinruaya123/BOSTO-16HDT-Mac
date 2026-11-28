@@ -406,7 +406,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSDictionary *current=UPLaunchDisplay(BTAvailableDisplays(),self.autoDetectTabletEnabled?nil:display[@"uuid"],NULL);
     if(![current isEqual:display])return nil;
     NSArray<NSNumber *> *devices=BTTabletRegistryIdentity();
-    return devices?@[display,devices]:nil;
+    return devices.count?@[display,devices]:nil;
 }
 - (void)reconcileInput {
     if(self.changingInputs || self.inputTerminating || self.inputSleeping || self.inputSessionInactive || self.checkingPermission || self.touch.running ||
@@ -537,20 +537,23 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     }
     self.enable.title=running || self.changingInputs?@"Stop driver (release tablet)":!listen?@"Request Input Monitoring…":!post?@"Request Accessibility…":@"Start driver";
     self.enable.enabled=!self.checkingPermission;
+    NSDictionary *setup=UPSetupStatus(state,listen,post,self.failure!=nil);
+    BOOL waitingForPen=controlling && [state[@"penObserver"][@"waitingForDevice"] boolValue];
     UPMenuState menuState=UPSetupMenuState(state,listen,post,self.failure!=nil);
     NSString *description=menuState==UPMenuPen?@"BostoTablet: pen in range or palm cooldown":menuState==UPMenuTouch?@"BostoTablet: touch gestures ready":@"BostoTablet: unavailable — check setup";
     NSImage *icon=UPMenuIcon(menuState);
-    if(controlling && menuState==UPMenuUnavailable && (!self.touch.touchInputEnabled || !self.touch.penInputEnabled)){
+    BOOL mutedMenu=controlling && menuState==UPMenuUnavailable && (!self.touch.touchInputEnabled || !self.touch.penInputEnabled);
+    if(mutedMenu){
         // An intentionally muted input is not a setup fault.
-        icon=self.touch.penInputEnabled?UPMenuIcon(UPMenuPen):([NSImage imageWithSystemSymbolName:@"pause.circle" accessibilityDescription:nil]?:icon);
-        description=[NSString stringWithFormat:@"BostoTablet: driver running — touch %@, pen %@",self.touch.touchInputEnabled?@"enabled":@"muted",self.touch.penInputEnabled?@"enabled":@"muted"];
+        icon=self.touch.penInputEnabled && !waitingForPen?UPMenuIcon(UPMenuPen):([NSImage imageWithSystemSymbolName:@"pause.circle" accessibilityDescription:nil]?:icon);
     }
+    if(waitingForPen || mutedMenu)
+        description=[NSString stringWithFormat:@"BostoTablet: touch — %@; pen — %@",setup[@"touch"],setup[@"pen"]];
     self.item.button.image=icon;
     self.item.button.toolTip=description;[self.item.button setAccessibilityLabel:description];
     NSNumber *battery=controlling?UPBatteryPercent(state[@"penObserver"][@"batteryPercent"]):nil;
     self.batteryLabel.stringValue=self.batteryMenu.title=UPBatteryDescription(battery);
     [self.batteryNotifications refresh];
-    NSDictionary *setup=UPSetupStatus(state,listen,post,self.failure!=nil);
     NSArray *keys=@[@"pen",@"touch",@"listen",@"post"];
     NSDictionary *colors=@{@"off":NSColor.secondaryLabelColor,@"waiting":NSColor.systemOrangeColor,@"active":NSColor.systemGreenColor};
     for(NSUInteger i=0;i<keys.count;i++){
@@ -570,7 +573,7 @@ static NSTextField *label(NSString *text,NSRect r) {NSTextField *v=[NSTextField 
     NSDictionary *names=@{@"inactive":@"Inactive — start the driver to test",@"noData":@"No data — waiting for an accepted pen packet",@"outOfRange":@"Pen out of range",@"tipUp":@"Tip up",@"tipDown":@"Tip down"};
     self.rawMeter.doubleValue=[pen[@"rawPressure"] doubleValue]/8192.0;
     self.effectiveMeter.doubleValue=[pen[@"effectivePressure"] doubleValue];
-    self.tester.stringValue=[NSString stringWithFormat:@"%@\nRaw %.0f / 8192 · Effective %.1f%%",names[phase]?:phase,[pen[@"rawPressure"] doubleValue],100*[pen[@"effectivePressure"] doubleValue]];
+    self.tester.stringValue=[NSString stringWithFormat:@"%@\nRaw %.0f / 8192 · Effective %.1f%%",waitingForPen?setup[@"pen"]:(names[phase]?:phase),[pen[@"rawPressure"] doubleValue],100*[pen[@"effectivePressure"] doubleValue]];
     NSDictionary *d=@{@"app":@"local.BostoTablet",@"state":state,@"listenAccess":@(IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)),@"postEventAccess":@(CGPreflightPostEventAccess()),@"legacy782C":@"Unsupported: different 19MB protocol; no legacy binary or guessed profile.",@"penWrites":@0};
     NSData *data=[NSJSONSerialization dataWithJSONObject:d options:NSJSONWritingPrettyPrinted|NSJSONWritingSortedKeys error:NULL];self.diagnostics.string=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding]?:@"Diagnostics unavailable";
 }

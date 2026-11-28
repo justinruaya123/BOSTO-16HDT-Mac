@@ -124,8 +124,7 @@ With Touch and Pen on, hovering the pen counts as pen input: the tip does not ne
 
 Choose **Compatibility** if you need BostoTablet to map one finger to an absolute position on the display, flip the touch Y axis, or map gestures to keyboard shortcuts. Switching modes does not change your Mac trackpad settings.
 
-BostoTablet starts pen and touch automatically when the selected display, exact
-USB interfaces, and existing macOS permissions are ready. It also resumes on
+With Touch enabled, BostoTablet starts touch as soon as the selected display, its verified touch interfaces, and the required macOS permissions are ready. The pen does not have to be connected, moved, or tapped first. If its USB interface appears later, the driver can attach it without restarting touch. It also resumes on
 reconnect or wake. **Stop driver (release tablet)** keeps the driver stopped until explicitly started again.
 Automatic startup never prompts for permission; use the setup button for missing
 Input Monitoring or Accessibility grants. Open at Login remains optional.

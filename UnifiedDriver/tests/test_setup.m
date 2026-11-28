@@ -53,6 +53,12 @@ int main(void) { @autoreleasepool {
     state[@"penObserver"]=@{@"running":@YES,@"presence":@"outOfRange",@"reports":@1,@"pressureState":@"outOfRange"};
     s=UPSetupStatus(state,YES,YES,NO);
     assert([s[@"pen"] isEqual:@"Active"] && [s[@"touch"] isEqual:@"Active"]);
+    NSMutableDictionary *degraded=[state mutableCopy];
+    degraded[@"touchRunningWithoutPen"]=@YES;degraded[@"penObserver"]=@{@"running":@NO};
+    NSDictionary *touchOnly=UPSetupStatus(degraded,YES,YES,NO);
+    assert([touchOnly[@"touch"] isEqual:@"Active"] && [touchOnly[@"pen"] isEqual:@"Unavailable — touch still enabled"]);
+    assert(UPSetupMenuState(degraded,YES,YES,NO)==UPMenuTouch);
+    assert(!UPSetupControlsInput(degraded,NO,YES,NO));
     // Readiness, not recent contact/report activity, determines the ready menu.
     state[@"validFrames"]=@0;state[@"activeContacts"]=@999;
     assert(UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
@@ -87,5 +93,22 @@ int main(void) { @autoreleasepool {
         assert(![blocked[@"pen"] isEqual:@"Muted by driver"] && ![blocked[@"touch"] isEqual:@"Active"]);
     state[@"running"]=@NO;
     assert(![UPSetupStatus(state,YES,YES,NO)[@"pen"] isEqual:@"Muted by driver"]);
+    // A confirmed touch session need not have a pen device. Opening is not an input report.
+    state[@"running"]=@YES;state[@"penInputEnabled"]=@NO;state[@"validFrames"]=@0;
+    state[@"penObserver"]=@{@"running":@YES,@"waitingForDevice":@YES,@"seized":@NO};
+    s=UPSetupStatus(state,YES,YES,NO);
+    assert([s[@"pen"] isEqual:@"Waiting for pen device"] && [s[@"penTone"] isEqual:@"waiting"]);
+    assert([s[@"touch"] isEqual:@"Waiting for reports"]);
+    state[@"validFrames"]=@1;state[@"penInputEnabled"]=@YES;
+    s=UPSetupStatus(state,YES,YES,NO);
+    assert([s[@"touch"] isEqual:@"Active"] && [s[@"touchTone"] isEqual:@"active"]);
+    assert([s[@"pen"] isEqual:@"Waiting for pen device"] && UPSetupMenuState(state,YES,YES,NO)==UPMenuTouch);
+    assert(!UPSetupControlsInput(state,NO,YES,NO) && !UPSetupControlsInput(state,YES,YES,YES));
+    state[@"running"]=@NO;
+    assert(!UPSetupControlsInput(state,YES,YES,NO)); // A waiting monitor cannot acknowledge touch startup.
+    state[@"running"]=@YES;state[@"penObserver"]=@{@"running":@NO,@"waitingForDevice":@YES};
+    assert(!UPSetupControlsInput(state,YES,YES,NO)); // A wait flag is not a running monitor.
+    state[@"penObserver"]=@{};
+    assert(!UPSetupControlsInput(state,YES,YES,NO)); // Missing state isn't an explicit wait.
     puts("Setup status and one-per-click permission routing checks passed (offline).");
 }return 0;}

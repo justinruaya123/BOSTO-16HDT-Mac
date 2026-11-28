@@ -2,7 +2,8 @@
 #import "BT16Touch.h"
 NSArray<NSDictionary *> *BTAvailableDisplays(void);
 #ifdef BT_UNIFIED_DRIVER
-// Metadata-only; returns one exact touch and one exact pen registry identity.
+// Metadata only. The retry key identifies the exact digitizer, independent of pen arrival/removal.
+// This never authorizes a pen open; the pen monitor verifies its own candidate.
 NSArray<NSNumber *> *BTTabletRegistryIdentity(void);
 #endif
 @interface BTTouchController : NSObject
