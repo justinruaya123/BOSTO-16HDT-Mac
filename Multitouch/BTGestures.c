@@ -4,7 +4,7 @@
 #include <string.h>
 
 BTGestureConfig BTGestureDefaultConfig(void) {
-    return (BTGestureConfig){2,0.06,3,4,0.04,12,0.5,false};
+    return (BTGestureConfig){2,0.06,3,4,0.04,12,0.5,false,false};
 }
 static bool validDelay(double n) { return isfinite(n) && n>=0 && n<=30; }
 static bool validConfig(BTGestureConfig c) {
@@ -71,7 +71,8 @@ BTGestureReadiness BTGestureGetReadiness(const BTGestureState *s,double time) {
 void BTGestureCancelForReportGap(BTGestureState *s,double time,BTGestureBatch *b) {
     if(!s || !b)return;
     // A partial lift only proves continuity while the survivor is observed.
-    bool rearm=s->lastCount && s->mode!=BTGestureAwaitingPartner && BTGestureGetReadiness(s,time)==BTGestureReadinessReady;
+    bool rearm=!s->config.nativeSinglePointer && s->lastCount && s->mode!=BTGestureAwaitingPartner &&
+        BTGestureGetReadiness(s,time)==BTGestureReadinessReady;
     BTGestureCancel(s,b);
     s->rearmPairAfterGap=rearm;
 }
@@ -108,11 +109,15 @@ static bool beginDrag(BTGestureState *s,BTGestureBatch *b) {
         return push(b,pointer(BTGesturePointerDrag,BTGesturePhaseChanged,s->x,s->y));
     return true;
 }
+static bool pressTimeout(const BTGestureState *s,double time) {
+    // A late second finger must never inherit a button press from a stationary first finger.
+    return !s->config.nativeSinglePointer && time-s->startedAt>=s->config.armingDelay;
+}
 bool BTGestureTick(BTGestureState *s,double time,BTGestureBatch *b) {
     if(!s || !b)return false;
     memset(b,0,sizeof *b);if(!clockStep(s,time,b))return false;
     if(suppressed(s,time))return suppressOutput(s,b);
-    if(s->mode==BTGestureOnePending && time-s->startedAt>=s->config.armingDelay)return beginDrag(s,b);
+    if(s->mode==BTGestureOnePending && pressTimeout(s,time))return beginDrag(s,b);
     return true;
 }
 static bool validFrame(const BTTouchFrame *frame,BTDisplayBounds bounds) {
@@ -141,13 +146,15 @@ static bool oneFinger(BTGestureState *s,BTGestureTouchInput input,BTGestureBatch
     if(s->mode==BTGestureIdle) {
         s->mode=BTGestureOnePending;s->identifiers[0]=contact.identifier;
         s->startedAt=input.time;s->startX=s->x=x;s->startY=s->y=y;
+        if(s->config.nativeSinglePointer)return push(b,pointer(BTGesturePointerMove,BTGesturePhaseNone,x,y));
     }
     if(contact.identifier!=s->identifiers[0]) {
         bool result=finish(s,b,BTGesturePhaseCancelled);s->mode=BTGestureBlocked;return result;
     }
     bool changed=x!=s->x || y!=s->y;s->x=x;s->y=y;
     if(s->mode==BTGestureOnePending) {
-        if(hypot(x-s->startX,y-s->startY)>=s->config.pointerSlop || input.time-s->startedAt>=s->config.armingDelay)
+        if(s->config.nativeSinglePointer && !changed)return true; // Even with zero slop, require movement.
+        if(hypot(x-s->startX,y-s->startY)>=s->config.pointerSlop || pressTimeout(s,input.time))
             return beginDrag(s,b);
         return true;
     }
@@ -213,16 +220,15 @@ bool BTGestureHandleTouch(BTGestureState *s,BTGestureTouchInput input,BTGestureB
     if(suppressed(s,input.time))return suppressOutput(s,b);
     if(input.frame.count==0) {
         if(s->mode==BTGestureOnePending) {
-            // Release before arming is a tap, never a lost or held click.
+            // A clean lift from a pending solitary contact commits the tap.
             if(!push(b,pointer(BTGesturePointerDown,BTGesturePhaseBegan,s->x,s->y)) ||
                !push(b,pointer(BTGesturePointerUp,BTGesturePhaseEnded,s->x,s->y)))return false;
             s->mode=BTGestureIdle;return true;
         }
         return finish(s,b,BTGesturePhaseEnded);
     }
-    if(input.frame.count>2) {
-        bool result=finish(s,b,BTGesturePhaseCancelled);s->mode=BTGestureBlocked;return result;
-    }
+    // macOS owns the entire multifinger sequence, including any solitary tail.
+    if(input.frame.count>2 || (s->config.nativeSinglePointer && input.frame.count==2))return suppressOutput(s,b);
     if(input.frame.count==2 && s->rearmPairAfterGap){
         // No pointer press and no old delta: the real pair only sets a baseline.
         s->mode=BTGestureIdle;s->rearmPairAfterGap=false;

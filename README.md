@@ -114,19 +114,18 @@ python3 -m unittest discover -s UnifiedDriver/tests -p test_version.py
 The package targets `/Applications/BostoTablet.app`. **Auto-detect tablet** is
 on by default and selects a unique nonmirrored **Bosto Tablet**, even if a
 manual display was previously saved. Turn it off to choose a display manually.
-**Touch orientation → Flip vertical** reverses only finger-touch Y; choose
-**Normal** to restore the original mapping. Both settings persist.
+**Touch orientation → Normal** (default) uses the former **Flip vertical** mapping.
+**Inverted** uses the former **Normal** mapping. The choice persists and applies
+to finger pointing in both touch modes, not to the pen or the Mac trackpad.
 **Touch** and **Pen** are independent settings for the BT-16HDT. Both default to on. Leave the driver running to enforce the settings: turning both off mutes the display’s input; stopping the driver releases the hardware to macOS.
 
 With Touch and Pen on, hovering the pen counts as pen input: the tip does not need to touch the glass. During pen use, palm rejection must cover both the display digitizer and the Bosto’s own native multitouch interface (`01:02`). The latter is normally available to macOS for finger gestures. With Touch off, both display touch interfaces stay muted while the driver runs. These controls apply to the Bosto display, not to the Mac’s trackpad or other accessories.
 
-**Gestures** keeps native two-finger scroll/pan and pinch zoom by default.
-Either gesture can run a recorded keyboard shortcut instead or be turned off.
-The tab shows how many reports carried multiple contacts; those counts do not
-prove an app received the resulting gesture.
+**Gestures → Native multitouch** (default): macOS and the receiving app handle finger gestures from the Bosto companion interface. One verified finger positions the cursor, taps on lift, or starts a drag after moving. Resting a finger does not press the mouse button. A second finger cancels a pending tap and ends a drag already in progress; the driver sends no scroll, zoom or shortcut. Which gestures work, and where zoom is centered, depend on macOS and the app. This is not a system-wide direct-touchscreen API.
 
-BostoTablet starts pen and touch automatically when the selected display, exact
-USB interfaces, and existing macOS permissions are ready. It also resumes on
+Choose **Compatibility** if you need BostoTablet to use its legacy click/drag behavior, flip the touch Y axis, or map gestures to keyboard shortcuts. Switching modes does not change your Mac trackpad settings.
+
+With Touch enabled, BostoTablet starts touch as soon as the selected display, its verified touch interfaces, and the required macOS permissions are ready. The pen does not have to be connected, moved, or tapped first. If its USB interface appears later, the driver can attach it without restarting touch. It also resumes on
 reconnect or wake. **Stop driver (release tablet)** keeps the driver stopped until explicitly started again.
 Automatic startup never prompts for permission; use the setup button for missing
 Input Monitoring or Accessibility grants. Open at Login remains optional.

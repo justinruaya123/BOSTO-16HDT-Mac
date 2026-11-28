@@ -1,12 +1,18 @@
 #import "BTPenMonitor.h"
 #import <ApplicationServices/ApplicationServices.h>
+#import <IOKit/hid/IOHIDLib.h>
 extern NSString *const UPFailureNotification;
+// Metadata only: verify the HID collection and its nearest physical USB device.
+uint64_t UPVerifiedPenRegistryID(IOHIDDeviceRef device);
 // Configure display while disabled; controls update on the main thread while running.
 // The touch controller creates this
 // replacement monitor; its presence callback is the sole palm-rejection source.
 @interface BTPenMonitor (UnifiedSettings)
 // Main-run-loop setting. Muting suppresses output, never releases the exact USB pen.
 @property(nonatomic) BOOL penInputEnabled;
+// Only initial discovery/ownership may degrade. Faults after ownership remain fatal.
+- (BOOL)startAllowingUnavailablePen:(BOOL)allow error:(NSError **)error;
+@property(nonatomic,readonly) BOOL unavailable;
 + (void)configureDisplay:(CGDirectDisplayID)display pressureExponent:(double)exponent;
 + (void)updatePressureExponent:(double)exponent;
 + (void)updateShortcutBindings:(NSArray *)bindings;

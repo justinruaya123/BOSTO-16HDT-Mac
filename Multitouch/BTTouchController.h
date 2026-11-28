@@ -2,7 +2,8 @@
 #import "BT16Touch.h"
 NSArray<NSDictionary *> *BTAvailableDisplays(void);
 #ifdef BT_UNIFIED_DRIVER
-// Metadata-only; returns one exact touch and one exact pen registry identity.
+// Metadata only. The retry key identifies the exact digitizer, independent of pen arrival/removal.
+// This never authorizes a pen open; the pen monitor verifies its own candidate.
 NSArray<NSNumber *> *BTTabletRegistryIdentity(void);
 #endif
 @interface BTTouchController : NSObject
@@ -17,8 +18,13 @@ NSArray<NSNumber *> *BTTabletRegistryIdentity(void);
 #ifdef BT_UNIFIED_DRIVER
 // Main-thread settings for the next start. Changing an active claim requires stop/restart.
 @property(nonatomic) BOOL touchInputEnabled, penInputEnabled;
+// YES (default): absolute pointer only; macOS owns multitouch. Report 3 has a
+// point and contact level but cannot distinguish a pinch. After the first active
+// report 4 the counted stream owns the pointer for the rest of the session.
+// NO: use the compatibility gesture synthesizer and its timed report 3 fallback.
+@property(nonatomic) BOOL nativeTouchEnabled;
 @property(nonatomic) BOOL flipTouchY;
-// Missing keys use native output. Values are @"off", @"shortcut" (unassigned), or a key binding.
+// Compatibility only. Missing keys use synthesized scroll/magnify instead of a key binding.
 @property(nonatomic,copy) NSDictionary<NSString *,id> *gestureActions;
 #endif
 - (void)stop;

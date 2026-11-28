@@ -93,8 +93,15 @@ static int penOpenCalls,penCloseCalls,boundaryViolations;
 #ifdef BT_UNIFIED_DRIVER
 static NSMutableArray *touchOpenAttempts,*touchClosed;
 static IOHIDReportCallback penReportCallback;
+static IOHIDDeviceCallback penAddedCallback;
+static void *penAddedContext;
+static NSSet *penInventory;
+static IOReturn penOpenResult;
+static dispatch_block_t beforePenDiscovery,duringPenOpen;
+
 static void *penReportContext;
-static BOOL requirePalmBeforePen,inRangeReport,pressDuringStartup;
+static BTPenPresence initialPen=BTPenOutOfRange;
+static BOOL requirePalmBeforePen,inRangeReport,pressDuringStartup,hoverDuringPenSchedule;
 static void pressFakeFinger(void);
 static unsigned nativePenPosts,unprotectedPenPosts;
 static void sendFakePen(BTPenPresence presence);
@@ -113,14 +120,15 @@ kern_return_t ReviewParent(io_registry_entry_t child,const io_name_t plane,io_re
 boolean_t ReviewConforms(io_object_t node,const io_name_t type){
     return (!strcmp(type,"IOUSBHostDevice") && usbNodes[@(node)]!=nil) || (!strcmp(type,"IOUSBHostInterface") && usbInterfaces[@(node)]!=nil);
 }
-kern_return_t ReviewRegistryID(io_registry_entry_t node,uint64_t *identifier){*identifier=node;return node?KERN_SUCCESS:KERN_FAILURE;}
+static io_registry_entry_t unreadableRegistryID;
+kern_return_t ReviewRegistryID(io_registry_entry_t node,uint64_t *identifier){*identifier=node;return node && node!=unreadableRegistryID?KERN_SUCCESS:KERN_FAILURE;}
 CFTypeRef ReviewRegistryProperty(io_registry_entry_t node,CFStringRef key,CFAllocatorRef allocator,IOOptionBits options){
     (void)allocator;(void)options;return (__bridge_retained CFTypeRef)(usbNodes[@(node)]?:usbInterfaces[@(node)])[(__bridge NSString *)key];
 }
 kern_return_t ReviewObjectRelease(io_object_t node){(void)node;return KERN_SUCCESS;}
 IOReturn ReviewDeviceOpen(IOHIDDeviceRef device,IOOptionBits options){
     assert(options==kIOHIDOptionsTypeSeizeDevice);
-    if(ReviewGetService(device)==41){penOpenCalls++;return kIOReturnSuccess;}
+    if(ReviewGetService(device)==41){penOpenCalls++;if(duringPenOpen)duringPenOpen();return penOpenResult;}
     openCalls++;[touchOpenAttempts addObject:(__bridge id)device];
     if(ReviewGetService(device)==failTouchOpenService)return kIOReturnExclusiveAccess;
     if(openResult==kIOReturnSuccess){assert(![seizedTouches containsObject:(__bridge id)device]);[seizedTouches addObject:(__bridge id)device];}
@@ -140,6 +148,7 @@ void ReviewDeviceRemoval(IOHIDDeviceRef device,IOHIDCallback callback,void *cont
 static io_service_t removeDuringSchedule;
 void ReviewDeviceSchedule(IOHIDDeviceRef device,CFRunLoopRef loop,CFStringRef mode){
     assert(loop && CFEqual(mode,kCFRunLoopCommonModes));[scheduledTouches addObject:(__bridge id)device];
+    if((hoverDuringPenSchedule || initialPen==BTPenInRange) && ReviewGetService(device)==41)sendFakePen(BTPenInRange);
     if(removeDuringSchedule && ReviewGetService(device)==removeDuringSchedule){
         removeDuringSchedule=0;removals[(__bridge id)device]();
     }
@@ -152,7 +161,9 @@ static void unplugFakeTouch(NSDictionary *device){
 static NSMutableArray<NSEvent *> *postedEvents;
 static NSMutableDictionary *testDefaults;
 static NSDictionary *fakePen,*fakeRange;
+#ifndef BT_UNIFIED_DRIVER
 static BTPenPresence initialPen=BTPenOutOfRange;
+#endif
 static uint64_t penStamp;
 static CFSetRef fakeDevices;
 static IOHIDDeviceCallback addedCallback;
@@ -184,9 +195,9 @@ CFTypeRef ReviewDeviceGetProperty(IOHIDDeviceRef device, CFStringRef key) {
 }
 IOReturn ReviewGetReport(IOHIDDeviceRef d,IOHIDReportType type,CFIndex rid,uint8_t *bytes,CFIndex *length) {
 #ifdef BT_UNIFIED_DRIVER
-    // A real in-range report while the owning controller is still initializing.
+    // A contact may arrive while touch firmware is being read, before pen discovery.
     if(pressDuringStartup)pressFakeFinger();
-    if(initialPen==BTPenInRange)sendFakePen(BTPenInRange);
+
 #endif
     (void)d;featureReads++;if(type!=kIOHIDReportTypeFeature || rid!=9 || *length<3)return kIOReturnBadArgument;
     memcpy(bytes,firmwareReply,3);*length=3;return featureReadResult;
@@ -204,11 +215,20 @@ void ReviewSetMatching(IOHIDManagerRef manager, CFArrayRef matches) {
 #else
     if(rows.count!=2)boundaryViolations++;
 #endif
-    for(NSDictionary *row in rows)if(![row[@kIOHIDVendorIDKey] isEqual:@0x6066] || ![row[@kIOHIDProductIDKey] isEqual:@1] ||
+    for(NSDictionary *row in rows){
+#ifdef BT_UNIFIED_DRIVER
+        if([row[@kIOHIDVendorIDKey] isEqual:@0xed1] && [row[@kIOHIDProductIDKey] isEqual:@0x7821] &&
+           [row[@kIOHIDPrimaryUsagePageKey] isEqual:@13] && [row[@kIOHIDPrimaryUsageKey] isEqual:@2])continue;
+#endif
+        if(![row[@kIOHIDVendorIDKey] isEqual:@0x6066] || ![row[@kIOHIDProductIDKey] isEqual:@1] ||
         !(([row[@kIOHIDPrimaryUsagePageKey] isEqual:@13] && [row[@kIOHIDPrimaryUsageKey] isEqual:@4]) ||
           ([row[@kIOHIDPrimaryUsagePageKey] isEqual:@1] && [row[@kIOHIDPrimaryUsageKey] isEqual:@2])))boundaryViolations++;
+    }
 }
 void ReviewPenMatching(IOHIDManagerRef manager,CFDictionaryRef match) {
+#ifdef BT_UNIFIED_DRIVER
+    if(beforePenDiscovery)beforePenDiscovery();
+#endif
     ((__bridge NSMutableDictionary *)manager)[@"pen"]=@YES;
     NSDictionary *row=(__bridge NSDictionary *)match;
     if(![row[@kIOHIDVendorIDKey] isEqual:@0x0ed1] || ![row[@kIOHIDProductIDKey] isEqual:@0x7821] ||
@@ -216,13 +236,14 @@ void ReviewPenMatching(IOHIDManagerRef manager,CFDictionaryRef match) {
 }
 void ReviewValueMatching(IOHIDManagerRef manager,CFDictionaryRef match) {(void)manager;(void)match;}
 CFSetRef ReviewCopyDevices(IOHIDManagerRef manager) {
+    #ifndef BT_UNIFIED_DRIVER
     if(penManager(manager))return (__bridge_retained CFSetRef)[NSSet setWithObject:fakePen];
-#ifndef BT_UNIFIED_DRIVER
     return CFSetCreateCopy(NULL,fakeDevices);
 #else
+    if(penManager(manager))return (__bridge_retained CFSetRef)penInventory;
     NSArray *rows=((__bridge NSDictionary *)manager)[@"matches"];
     NSMutableSet *selected=[NSMutableSet set];
-    for(NSDictionary *device in (__bridge NSSet *)fakeDevices)for(NSDictionary *row in rows){
+    for(NSDictionary *device in [(__bridge NSSet *)fakeDevices setByAddingObjectsFromSet:penInventory?:[NSSet set]])for(NSDictionary *row in rows){
         BOOL match=YES;for(id key in row)if(![row[key] isEqual:device[key]]){match=NO;break;}
         if(match)[selected addObject:device];
     }
@@ -235,7 +256,15 @@ void ReviewRegisterRemoved(IOHIDManagerRef manager,IOHIDDeviceCallback callback,
     if(penManager(manager)){penRemovedCallback=callback;penRemovedContext=context;return;}
     removedCallback=callback;removedContext=context;
 }
-void ReviewRegisterAdded(IOHIDManagerRef manager,IOHIDDeviceCallback callback,void *context) {if(penManager(manager))return;addedCallback=callback;addedContext=context;}
+void ReviewRegisterAdded(IOHIDManagerRef manager,IOHIDDeviceCallback callback,void *context) {
+    if(penManager(manager)){
+#ifdef BT_UNIFIED_DRIVER
+        penAddedCallback=callback;penAddedContext=context;
+#endif
+        return;
+    }
+    addedCallback=callback;addedContext=context;
+}
 void ReviewSchedule(IOHIDManagerRef manager,CFRunLoopRef loop,CFStringRef mode) {
     (void)loop;if(!CFEqual(mode,kCFRunLoopCommonModes))boundaryViolations++;
     ((__bridge NSMutableDictionary *)manager)[@"mode"]=(__bridge NSString *)mode;
@@ -294,10 +323,11 @@ static void resetFakes(void) {
     penOpenCalls=penCloseCalls=boundaryViolations=0;initialPen=BTPenOutOfRange;penStamp=100;
     postedEvents=[NSMutableArray array];testDefaults=[NSMutableDictionary dictionary];
 #ifdef BT_UNIFIED_DRIVER
-    touchOpenAttempts=[NSMutableArray array];touchClosed=[NSMutableArray array];
+    penOpenResult=kIOReturnSuccess;beforePenDiscovery=duringPenOpen=nil;
+    touchOpenAttempts=[NSMutableArray array];touchClosed=[NSMutableArray array];unreadableRegistryID=0;
     [BTPenMonitor configureDisplay:42 pressureExponent:1];
     removals=[NSMutableDictionary dictionary];scheduledTouches=[NSMutableSet set];penReportCallback=NULL;
-    requirePalmBeforePen=inRangeReport=pressDuringStartup=NO;nativePenPosts=unprotectedPenPosts=0;
+    requirePalmBeforePen=inRangeReport=pressDuringStartup=hoverDuringPenSchedule=NO;nativePenPosts=unprotectedPenPosts=0;
     seizedTouches=[NSMutableSet set];failTouchOpenService=failTouchCloseOnce=0;unpluggedDevice=NULL;reportCallback=NULL;
     parents=[@{@11:@21,@12:@22,@21:@31,@22:@31,@41:@51} mutableCopy];
     usbInterfaces=[@{@21:@{@"bInterfaceNumber":@1},@22:@{@"bInterfaceNumber":@0}} mutableCopy];
@@ -306,7 +336,7 @@ static void resetFakes(void) {
 #endif
     fakePen=@{@kIOHIDVendorIDKey:@0x0ed1,@kIOHIDProductIDKey:@0x7821,@kIOHIDPrimaryUsagePageKey:@13,@kIOHIDPrimaryUsageKey:@2};
 #ifdef BT_UNIFIED_DRIVER
-    NSMutableDictionary *usbPen=[fakePen mutableCopy];[usbPen addEntriesFromDictionary:@{@kIOHIDTransportKey:@"USB",@kIOHIDLocationIDKey:@0x12340000,@"service":@41}];fakePen=usbPen;
+    NSMutableDictionary *usbPen=[fakePen mutableCopy];[usbPen addEntriesFromDictionary:@{@kIOHIDTransportKey:@"USB",@kIOHIDLocationIDKey:@0x12340000,@"service":@41}];fakePen=usbPen;penInventory=[NSSet setWithObject:fakePen];
 #endif
     fakeRange=@{@"device":fakePen};
     featureReads=featureWrites=0;featureReadResult=featureWriteResult=kIOReturnSuccess;

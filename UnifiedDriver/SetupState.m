@@ -2,7 +2,7 @@
 #import "BTGestures.h"
 
 BOOL UPSetupControlsInput(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
-    return !fault && listenGranted && postGranted && [snapshot[@"running"] boolValue] && [snapshot[@"penObserver"][@"running"] boolValue];
+    return !fault && listenGranted && postGranted && [snapshot[@"running"] boolValue] && ([snapshot[@"penObserver"][@"running"] boolValue] || [snapshot[@"touchRunningWithoutPen"] boolValue]);
 }
 UPMenuState UPSetupMenuState(NSDictionary *snapshot, BOOL listenGranted, BOOL postGranted, BOOL fault) {
     if(!UPSetupControlsInput(snapshot,listenGranted,postGranted,fault))return UPMenuUnavailable;
@@ -33,16 +33,17 @@ NSDictionary *UPSetupStatus(NSDictionary *snapshot, BOOL listenGranted, BOOL pos
     NSDictionary *pen=snapshot[@"penObserver"];
     BOOL controlling=UPSetupControlsInput(snapshot,listenGranted,postGranted,fault);
     NSString *unavailable=!running?@"Driver inactive":@"Driver unavailable";
-    BOOL penMuted=controlling && [snapshot[@"penInputEnabled"] isEqual:@NO];
+    BOOL waitingForDevice=[pen[@"waitingForDevice"] boolValue];
+    BOOL penMuted=controlling && !waitingForDevice && [snapshot[@"penInputEnabled"] isEqual:@NO];
     BOOL touchMuted=controlling && [snapshot[@"touchInputEnabled"] isEqual:@NO];
-    BOOL penActive=controlling && !penMuted && [pen[@"reports"] unsignedIntegerValue]>0 &&
+    BOOL penActive=controlling && !waitingForDevice && !penMuted && [pen[@"reports"] unsignedIntegerValue]>0 &&
         ![pen[@"pressureState"] isEqual:@"noData"] && ![pen[@"pressureState"] isEqual:@"inactive"];
     BOOL touchActive=controlling && !touchMuted && [snapshot[@"validFrames"] unsignedIntegerValue]>0;
-    NSString *penText=!controlling?unavailable:penMuted?@"Muted by driver":penActive?@"Active":@"Waiting for reports";
-    NSString *touchText=!controlling?unavailable:touchMuted?@"Muted by driver":touchActive?@"Active":@"Waiting for reports";
+    NSString *penText=!controlling?unavailable:[snapshot[@"touchRunningWithoutPen"] boolValue]?@"Unavailable — touch still enabled":waitingForDevice?@"Waiting for pen device":penMuted?@"Muted by driver":penActive?@"Active":@"Waiting for reports";
+    NSString *touchText=!controlling?unavailable:touchMuted?@"Muted by driver":touchActive?@"Touch reports received":@"Waiting for reports";
     NSUInteger readiness=[snapshot[@"gestureReadiness"] unsignedIntegerValue];
     BOOL suppressed=running && (readiness==BTGestureReadinessPen || readiness==BTGestureReadinessLiftRequired);
-    if(touchActive && suppressed)touchText=@"Active — palm suppression";
+    if(touchActive && suppressed)touchText=@"Touch reports received — palm suppression";
     return @{@"pen":penText,@"touch":touchText,@"listen":listenGranted?@"Granted":@"Not granted",
              @"post":postGranted?@"Granted":@"Not granted",
              @"penTone":!controlling || penMuted?@"off":penActive?@"active":@"waiting",
